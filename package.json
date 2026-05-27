@@ -1,0 +1,31 @@
+{
+  "name": "foreign-trade-aggregation-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@types/three": "^0.184.1",
+    "lucide-react": "^0.468.0",
+    "next": "16.2.6",
+    "pg": "^8.21.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "three": "^0.184.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.25",
+    "@types/pg": "^8.20.0",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.2",
+    "eslint-config-next": "16.2.6",
+    "typescript": "^5.9.3"
+  }
+}

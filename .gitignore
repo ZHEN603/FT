@@ -1,1 +1,7 @@
-misc/
+node_modules/
+.next/
+.npm-cache/
+data/*.sqlite
+data/*.sqlite-*
+.env
+.env.local
