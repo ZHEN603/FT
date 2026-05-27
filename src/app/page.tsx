@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleHelp,
+  Copy,
   Grid2X2,
   Heart,
   Layers,
@@ -63,7 +64,10 @@ type Catalog = {
 };
 type CartItem = { offerId: string; skuIndex: number; quantity: number };
 type StorefrontState = { sessionId: string; saved: string[]; cart: CartItem[] };
-type ViewMode = "home" | "catalog" | "container";
+type InquiryReceipt = { id: string; title: string; version: number };
+type InquiryAccess = { accessUrl: string; expiresAt: string };
+type InquiryAdvisor = { name: string; whatsapp: string };
+type ViewMode = "home" | "catalog" | "container" | "comingSoon";
 type SortMode = "default" | "priceAsc" | "priceDesc" | "skuDesc";
 
 const fallbackCatalog = catalogData as Catalog;
@@ -76,6 +80,8 @@ const CONTAINER_SPECS: Record<string, { name: string; width: number; height: num
   "45HQ": { name: "45HQ 高柜", width: 2.35, height: 2.69, volume: 86, maxWeight: 27800, ocean: 3180 }
 };
 const CONTAINER_VOLUME = CONTAINER_SPECS["40GP"].volume;
+const DEFAULT_ADVISOR: InquiryAdvisor = { name: "Luna · 外贸顾问", whatsapp: "+86 138 0000 0000" };
+// 保留原 mock 询盘车数据，Phase1 起默认不再预填，避免提交后又恢复 mock item。
 const DEFAULT_CART: CartItem[] = [
   { offerId: "775022487805", skuIndex: 0, quantity: 600 },
   { offerId: "917043704084", skuIndex: 0, quantity: 1000 },
@@ -137,6 +143,7 @@ export default function StorefrontPage() {
   const [loadingCatalog, setLoadingCatalog] = useState(true);
   const [submitError, setSubmitError] = useState("");
   const [view, setView] = useState<ViewMode>("home");
+  const [comingSoonTitle, setComingSoonTitle] = useState("");
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
   const [material, setMaterial] = useState("all");
@@ -148,13 +155,16 @@ export default function StorefrontPage() {
   const [selectedProduct, setSelectedProduct] = useState<CatalogProduct | null>(null);
   const [showQuote, setShowQuote] = useState(false);
   const [submittedQuote, setSubmittedQuote] = useState<Quote | null>(null);
-  const [cart, setCart] = useState<CartItem[]>(DEFAULT_CART);
+  const [submittedReceipt, setSubmittedReceipt] = useState<InquiryReceipt | null>(null);
+  const [submittedAccess, setSubmittedAccess] = useState<InquiryAccess | null>(null);
+  const [cart, setCart] = useState<CartItem[]>(() => DEFAULT_CART.slice(0, 0));
   const [saved, setSaved] = useState<Set<string>>(() => new Set());
   const [containerType, setContainerType] = useState("40GP");
   const [sessionId, setSessionId] = useState("");
   const [stateReady, setStateReady] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [chatMessage, setChatMessage] = useState("");
+  const modalOpen = Boolean(selectedProduct || showQuote || showChat || submittedQuote);
 
   useEffect(() => {
     let cancelled = false;
@@ -186,7 +196,7 @@ export default function StorefrontPage() {
         window.localStorage.setItem("ft-storefront-session", data.sessionId);
         setSessionId(data.sessionId);
         setSaved(new Set(data.saved));
-        if (data.cart.length) setCart(data.cart);
+        setCart(data.cart);
         setStateReady(true);
       })
       .catch(() => {
@@ -213,6 +223,15 @@ export default function StorefrontPage() {
       controller.abort();
     };
   }, [cart, saved, sessionId, stateReady]);
+
+  useEffect(() => {
+    if (!modalOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [modalOpen]);
 
   const categories = [{ id: "all", name: "全部产品", count: catalog.products.length }, ...catalog.categories];
   const materials = ["all", ...Array.from(new Set(catalog.products.map(productMaterial)))];
@@ -250,13 +269,13 @@ export default function StorefrontPage() {
     const productAmount = cartRows.reduce((sum, row) => sum + (row.sku.price ?? row.product.basePrice) * row.quantity, 0);
     const volume = cartRows.reduce((sum, row) => sum + Math.max(row.product.cbm || 0.001, 0.001) * row.quantity, 0);
     const weight = cartRows.reduce((sum, row) => sum + Math.max(row.product.weight || 0.08, 0.08) * row.quantity, 0);
-    const freight = cartRows.length ? 2380 + 320 + 90 + 145 + productAmount * 0.003 : 0;
+    const freight = 0;
     return {
       productAmount,
       volume,
       weight,
       freight,
-      total: productAmount + freight * 7.24,
+      total: productAmount,
       utilization: Math.min(99, (volume / CONTAINER_VOLUME) * 100),
       quantity: cartRows.reduce((sum, row) => sum + row.quantity, 0)
     };
@@ -265,6 +284,11 @@ export default function StorefrontPage() {
   function openCatalog(nextCategory = "all") {
     setCategory(nextCategory);
     setView("catalog");
+  }
+
+  function openComingSoon(title: string) {
+    setComingSoonTitle(title);
+    setView("comingSoon");
   }
 
   function toggleSaved(offerId: string) {
@@ -288,12 +312,17 @@ export default function StorefrontPage() {
   }
 
   function updateQuantity(offerId: string, skuIndex: number, next: number) {
-    const product = catalog.products.find((entry) => entry.offerId === offerId);
-    setCart((current) => current.map((item) => (
-      item.offerId === offerId && item.skuIndex === skuIndex
-        ? { ...item, quantity: Math.max(minOrder(product ?? catalog.products[0]), next) }
-        : item
-    )));
+    const quantity = Number.isFinite(next) ? Math.floor(next) : 0;
+    setCart((current) => {
+      if (quantity <= 0) {
+        return current.filter((item) => !(item.offerId === offerId && item.skuIndex === skuIndex));
+      }
+      return current.map((item) => (
+        item.offerId === offerId && item.skuIndex === skuIndex
+          ? { ...item, quantity }
+          : item
+      ));
+    });
   }
 
   function removeCartItem(offerId: string, skuIndex: number) {
@@ -306,17 +335,19 @@ export default function StorefrontPage() {
     const payload = {
       customerName: String(formData.get("name") || "Lucas Brown"),
       company: String(formData.get("company") || "Global Retail Inc."),
+      sessionId,
       country: String(formData.get("country") || "United States"),
       port: String(formData.get("port") || "Los Angeles"),
       whatsapp: String(formData.get("whatsapp") || "+1 310 555 0188"),
       email: String(formData.get("email") || "lucas@globalretail.com"),
-      containerType,
+      // Phase1 前台询盘不启用集装箱方案，字段保留给现有报价模型兼容。
+      containerType: "Product Inquiry",
       note: String(formData.get("note") || ""),
       totals: {
         productAmount: totals.productAmount,
         shippingFee: totals.freight,
-        volume: totals.volume,
-        weight: totals.weight
+        volume: 0,
+        weight: 0
       },
       items: cartRows.map((row) => ({ offerId: row.offerId, skuIndex: row.skuIndex, quantity: row.quantity }))
     };
@@ -330,9 +361,18 @@ export default function StorefrontPage() {
       setSubmitError(data.message ?? "提交失败，请稍后重试。");
       return;
     }
-    const data = await response.json() as { quote: Quote };
+    const data = await response.json() as { quote: Quote; receipt?: InquiryReceipt; access?: InquiryAccess };
     setShowQuote(false);
     setCart([]);
+    if (sessionId) {
+      void fetch("/api/storefront/state", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, saved: Array.from(saved), cart: [] })
+      }).catch(() => undefined);
+    }
+    setSubmittedReceipt(data.receipt ?? null);
+    setSubmittedAccess(data.access ?? null);
     setSubmittedQuote(data.quote ?? {
       id,
       customerName: payload.customerName,
@@ -341,7 +381,7 @@ export default function StorefrontPage() {
       port: payload.port,
       whatsapp: payload.whatsapp,
       email: payload.email,
-      containerType,
+      containerType: "Product Inquiry",
       productCount: cartRows.length,
       totalProducts: totals.quantity,
       productAmount: totals.productAmount,
@@ -387,10 +427,10 @@ export default function StorefrontPage() {
         <nav>
           <button onClick={() => setView("home")}>首页</button>
           <button onClick={() => openCatalog("all")}>产品中心</button>
-          <button>定制服务</button>
-          <button>关于我们</button>
-          <button>资源</button>
-          <button>联系我们</button>
+          <button onClick={() => openComingSoon("定制服务")}>定制服务</button>
+          <button onClick={() => openComingSoon("关于我们")}>关于我们</button>
+          <button onClick={() => openComingSoon("资源")}>资源</button>
+          <button onClick={() => openComingSoon("联系我们")}>联系我们</button>
         </nav>
         <label className="ft-search"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") openCatalog(category); }} placeholder="搜索商品、SKU、Offer ID" /></label>
         <button className="ft-red-btn" onClick={() => openCatalog(category)}>搜索</button>
@@ -408,7 +448,8 @@ export default function StorefrontPage() {
               </button>
             ))}
           </section>
-          <MiniContainerCard totals={totals} containerType={containerType} onTypeChange={setContainerType} onOpen={() => setView("container")} />
+          {/* 集装箱估算 Phase1 暂时隐藏，相关组件和逻辑保留以便后续恢复。 */}
+          {false && <MiniContainerCard totals={totals} containerType={containerType} onTypeChange={setContainerType} onOpen={() => setView("container")} />}
         </aside>
 
         <section className="ft-main">
@@ -436,9 +477,14 @@ export default function StorefrontPage() {
               onCustom={setCustomOnly}
               onOpen={setSelectedProduct}
               onSave={toggleSaved}
+              onHome={() => setView("home")}
+              onCatalogRoot={() => openCatalog("all")}
             />
           )}
-          {view === "container" && (
+          {view === "comingSoon" && (
+            <ComingSoonView title={comingSoonTitle || "敬请期待"} onHome={() => setView("home")} onCatalog={() => openCatalog("all")} />
+          )}
+          {false && view === "container" && (
             <ContainerView
               cartRows={cartRows}
               totals={totals}
@@ -453,16 +499,53 @@ export default function StorefrontPage() {
       </div>
 
       <div className="ft-floating">
-        <button className="ft-outline" onClick={() => setView(view === "container" ? "catalog" : "container")}>{view === "container" ? "返回产品" : "查看我的集装箱"}</button>
+        {/* 集装箱页入口 Phase1 暂时隐藏，保留代码。 */}
+        {false && <button className="ft-outline" onClick={() => setView(view === "container" ? "catalog" : "container")}>{view === "container" ? "返回产品" : "查看我的集装箱"}</button>}
         <button className="ft-red-btn" onClick={() => setShowQuote(true)}><Send size={18} /> 提交询价</button>
       </div>
 
       {selectedProduct && <ProductSpecModal product={selectedProduct} saved={saved.has(selectedProduct.offerId)} onClose={() => setSelectedProduct(null)} onAdd={addToCart} onSave={toggleSaved} />}
-      {showQuote && <InquiryModal cartRows={cartRows} totals={totals} containerType={containerType} submitError={submitError} onClose={() => setShowQuote(false)} onSubmit={submitQuote} />}
+      {showQuote && (
+        <InquiryModal
+          cartRows={cartRows}
+          totals={totals}
+          submitError={submitError}
+          onClose={() => setShowQuote(false)}
+          onQuantity={updateQuantity}
+          onRemove={removeCartItem}
+          onSubmit={submitQuote}
+        />
+      )}
       {showChat && <ChatModal sessionId={sessionId} message={chatMessage} submitError={submitError} onMessage={setChatMessage} onClose={() => setShowChat(false)} onSubmit={submitChat} />}
-      {submittedQuote && <SuccessModal quote={submittedQuote} onClose={() => setSubmittedQuote(null)} />}
+      {submittedQuote && (
+        <SuccessModal
+          quote={submittedQuote}
+          receipt={submittedReceipt}
+          access={submittedAccess}
+          advisor={DEFAULT_ADVISOR}
+          onClose={() => setSubmittedQuote(null)}
+        />
+      )}
       <button className="ft-chat-button" onClick={() => setShowChat(true)}>沟通中心</button>
     </main>
+  );
+}
+
+function ComingSoonView({ title, onHome, onCatalog }: { title: string; onHome: () => void; onCatalog: () => void }) {
+  return (
+    <section className="ft-coming-soon">
+      <nav className="ft-breadcrumb" aria-label="页面导航">
+        <button type="button" onClick={onHome}>首页</button>
+        <span aria-hidden="true">›</span>
+        <strong aria-current="page">{title}</strong>
+      </nav>
+      <div className="ft-coming-panel">
+        <span>{title}</span>
+        <h1>敬请期待</h1>
+        <p>该页面正在规划中。当前阶段请先使用产品中心、询盘车和沟通中心完成核心询盘流程。</p>
+        <button className="ft-red-btn" type="button" onClick={onCatalog}>返回产品中心</button>
+      </div>
+    </section>
   );
 }
 
@@ -515,7 +598,9 @@ function CatalogView({
   onStock,
   onCustom,
   onOpen,
-  onSave
+  onSave,
+  onHome,
+  onCatalogRoot
 }: {
   products: CatalogProduct[];
   title: string;
@@ -534,10 +619,24 @@ function CatalogView({
   onCustom: (value: boolean) => void;
   onOpen: (product: CatalogProduct) => void;
   onSave: (offerId: string) => void;
+  onHome: () => void;
+  onCatalogRoot: () => void;
 }) {
   return (
     <section className="ft-catalog">
-      <div className="ft-breadcrumb">首页 › 产品中心 › {title}</div>
+      <nav className="ft-breadcrumb" aria-label="页面导航">
+        <button type="button" onClick={onHome}>首页</button>
+        <span aria-hidden="true">›</span>
+        {title === "全部产品" ? (
+          <strong aria-current="page">产品中心</strong>
+        ) : (
+          <>
+            <button type="button" onClick={onCatalogRoot}>产品中心</button>
+            <span aria-hidden="true">›</span>
+            <strong aria-current="page">{title}</strong>
+          </>
+        )}
+      </nav>
       <div className="ft-catalog-panel">
         <div className="ft-catalog-head">
           <div><h1>{title}</h1><span>共 {products.length} 个产品</span></div>
@@ -747,12 +846,13 @@ function ContainerView({
   );
 }
 
-function InquiryModal({ cartRows, totals, containerType, submitError, onClose, onSubmit }: {
+function InquiryModal({ cartRows, totals, submitError, onClose, onQuantity, onRemove, onSubmit }: {
   cartRows: Array<CartItem & { product: CatalogProduct; sku: CatalogSku }>;
-  totals: { productAmount: number; freight: number; total: number; volume: number; weight: number };
-  containerType: string;
+  totals: { productAmount: number; freight: number; total: number; volume: number; weight: number; quantity: number };
   submitError: string;
   onClose: () => void;
+  onQuantity: (offerId: string, skuIndex: number, quantity: number) => void;
+  onRemove: (offerId: string, skuIndex: number) => void;
   onSubmit: (formData: FormData) => void | Promise<void>;
 }) {
   return (
@@ -760,10 +860,23 @@ function InquiryModal({ cartRows, totals, containerType, submitError, onClose, o
       <form className="ft-inquiry-modal" action={onSubmit}>
         <button className="ft-modal-close" type="button" onClick={onClose}><X size={22} /></button>
         <h2>提交询盘</h2>
-        <p>请留下联系方式，我们会确认最终海运价格与产品报价。</p>
-        <div className="summary"><span>{containerType}</span><span>{cartRows.length} 种产品</span><span>{rmb.format(totals.productAmount)}</span><strong>{rmb.format(totals.total)}</strong></div>
+        <p>请留下联系方式，我们会确认产品规格、数量、MOQ 与最终报价。</p>
+        <div className="summary"><span>{cartRows.length} 种产品</span><span>{totals.quantity} 件</span><span>{rmb.format(totals.productAmount)}</span><strong>{rmb.format(totals.total)}</strong></div>
         <div className="cart-lines">
-          {cartRows.slice(0, 4).map((row) => <div key={`${row.offerId}-${row.skuIndex}`}><img src={row.sku.image || row.product.image} alt="" /><span>{productTitle(row.product)}</span><strong>x {row.quantity}</strong></div>)}
+          {cartRows.length ? cartRows.map((row) => (
+            <div key={`${row.offerId}-${row.skuIndex}`}>
+              <img src={row.sku.image || row.product.image} alt="" />
+              <span>{productTitle(row.product)}</span>
+              <div className="cart-line-actions">
+                <div className="mini-stepper">
+                  <button type="button" onClick={() => onQuantity(row.offerId, row.skuIndex, row.quantity - 1)}>-</button>
+                  <input value={row.quantity} onChange={(event) => onQuantity(row.offerId, row.skuIndex, Number(event.target.value))} />
+                  <button type="button" onClick={() => onQuantity(row.offerId, row.skuIndex, row.quantity + 1)}>+</button>
+                </div>
+                <button className="cart-remove" type="button" onClick={() => onRemove(row.offerId, row.skuIndex)}>删除</button>
+              </div>
+            </div>
+          )) : <p className="cart-empty">询盘车为空，请先添加产品。</p>}
         </div>
         <div className="form-grid">
           <label>姓名 *<input name="name" required placeholder="Lucas Brown" /></label>
@@ -771,8 +884,8 @@ function InquiryModal({ cartRows, totals, containerType, submitError, onClose, o
           <label>WhatsApp *<input name="whatsapp" required placeholder="+1 310 555 0188" /></label>
           <label>邮箱<input name="email" placeholder="lucas@globalretail.com" /></label>
           <label>国家 / 地区<input name="country" defaultValue="United States" /></label>
-          <label>目的港<input name="port" defaultValue="Los Angeles" /></label>
-          <label className="full">备注<textarea name="note" defaultValue={`集装箱询价：${containerType}\n货物体积：${totals.volume.toFixed(2)} m³\n货物毛重：${totals.weight.toFixed(0)} kg`} /></label>
+          <label>目的地 / 城市<input name="port" placeholder="Los Angeles" /></label>
+          <label className="full">备注<textarea name="note" placeholder="请补充目标产品、颜色、包装、Logo、交期或其他采购要求。" /></label>
         </div>
         {submitError && <div className="ft-api-message">{submitError}</div>}
         <div className="modal-actions"><button className="ft-outline" type="button" onClick={onClose}>取消</button><button className="ft-red-btn" type="submit" disabled={!cartRows.length}>提交给客服报价</button></div>
@@ -816,14 +929,62 @@ function ChatModal({ sessionId, message, submitError, onMessage, onClose, onSubm
   );
 }
 
-function SuccessModal({ quote, onClose }: { quote: Quote; onClose: () => void }) {
+function SuccessModal({
+  quote,
+  receipt,
+  access,
+  advisor,
+  onClose
+}: {
+  quote: Quote;
+  receipt: InquiryReceipt | null;
+  access: InquiryAccess | null;
+  advisor: InquiryAdvisor;
+  onClose: () => void;
+}) {
+  const whatsappText = `Hello, I submitted inquiry ${quote.id}. Please help confirm product quotation.`;
+  const whatsappUrl = `https://wa.me/${advisor.whatsapp.replace(/[^\d]/g, "")}?text=${encodeURIComponent(whatsappText)}`;
+  function copyAdvisor() {
+    void navigator.clipboard?.writeText(advisor.whatsapp);
+  }
   return (
     <div className="ft-modal-backdrop">
-      <div className="ft-success-modal">
-        <CheckCircle2 size={58} />
-        <h2>询价已提交</h2>
-        <p>报价单 {quote.id} 已同步到后台，业务人员将通过 WhatsApp 跟进。</p>
-        <div><button className="ft-red-btn">WhatsApp 联系客户经理</button><a className="ft-outline" href="/admin?section=quotes">查看后台报价单</a><button className="ft-outline" onClick={onClose}>关闭</button></div>
+      <div className="ft-success-modal inquiry-success-modal">
+        <button className="ft-modal-close" type="button" onClick={onClose}><X size={22} /></button>
+        <h2>提交询价</h2>
+        <div className="success-banner">
+          <CheckCircle2 size={46} />
+          <div>
+            <strong>询价已提交，建议通过 WhatsApp 立即联系</strong>
+            <span>我们已生成询盘单和回执，业务顾问将根据产品明细确认最终报价。</span>
+          </div>
+        </div>
+        <section className="advisor-card">
+          <div className="advisor-avatar">☘</div>
+          <div>
+            <span>专属顾问</span>
+            <strong>{advisor.name}</strong>
+            <em>{advisor.whatsapp}</em>
+          </div>
+          <a className="ft-red-btn" href={whatsappUrl} target="_blank" rel="noreferrer">打开 WhatsApp</a>
+          <button className="ft-outline" type="button" onClick={copyAdvisor}><Copy size={16} /> 复制号码</button>
+        </section>
+        <section className="success-summary">
+          <h3>询价摘要</h3>
+          <div><span>询盘编号</span><strong>{quote.id}</strong></div>
+          <div><span>产品种类</span><strong>{quote.productCount} 种产品</strong></div>
+          <div><span>产品数量</span><strong>{quote.totalProducts.toLocaleString()} 件</strong></div>
+          <div><span>商品小计</span><strong>{rmb.format(quote.productAmount)}</strong></div>
+        </section>
+        <section className="message-preview">
+          <h3>发送给顾问的信息预览</h3>
+          <p>Hello, I submitted inquiry {quote.id}. My selected products have been added to the inquiry cart. Please confirm MOQ, packaging and final quotation.</p>
+        </section>
+        <div className="success-actions">
+          {receipt && <a className="ft-red-btn" href={`/api/storefront/documents/${receipt.id}`}>下载询盘回执</a>}
+          {access && <a className="ft-outline" href={access.accessUrl}>查看报价进度</a>}
+          <button className="ft-outline" onClick={onClose}>稍后联系</button>
+        </div>
       </div>
     </div>
   );

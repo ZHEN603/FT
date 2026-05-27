@@ -242,6 +242,17 @@ export function AdminSidebar({
     });
   }
 
+  function handleNavItemClick(item: (typeof groups)[number]) {
+    if (item.children) {
+      if (collapsed) {
+        setCollapsed(false);
+      }
+      toggleGroup(item.id);
+      return;
+    }
+    navigate(item.id);
+  }
+
   return (
     <aside className={collapsed ? "admin-sidebar collapsed" : "admin-sidebar"}>
       <div className="admin-logo">
@@ -265,7 +276,7 @@ export function AdminSidebar({
           <div key={item.id}>
             <button
               className={active === item.id ? "admin-nav-item active" : "admin-nav-item"}
-              onClick={() => navigate(item.id, item.id === "products" ? "list" : undefined)}
+              onClick={() => handleNavItemClick(item)}
               type="button"
             >
               <item.icon size={18} />

@@ -1,8 +1,11 @@
-import { randomUUID } from "node:crypto";
-import { Pool, type PoolClient } from "pg";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { Pool, type PoolClient, type QueryResult } from "pg";
 import catalogData from "@/data/catalog.json";
 import { categories, initialQuotes, products } from "./mock-data";
 import type { AdminUser, Category, Product, ProductSpec, Quote } from "./types";
+import { normalizeWhatsapp, sendWhatsAppText } from "./whatsapp";
 
 export type ProductStatus = "active" | "inactive";
 export type CategoryStatus = "active" | "inactive";
@@ -84,10 +87,36 @@ export type ProductMarkupInput = {
   ruleId?: string | null;
   status?: MarkupStatus;
 };
+export type ProductMarkupListInput = {
+  page?: number;
+  pageSize?: number;
+  query?: string;
+  categoryId?: string;
+  status?: MarkupStatus | "all";
+  ruleId?: string | "all" | "none";
+};
+export type ProductMarkupListResult = {
+  products: ProductMarkup[];
+  pagination: {
+    total: number;
+    page: number;
+    pageSize: number;
+    totalPages: number;
+  };
+  metrics: {
+    total: number;
+    configured: number;
+    applied: number;
+    unset: number;
+  };
+};
 export type QuoteWithItems = Quote & {
   quoteNo: string;
+  customerId?: string | null;
   contactName: string;
   destinationPort: string;
+  currency: "CNY" | "USD";
+  exchangeRate: number;
   loadedVolumeM3: number;
   maxVolumeM3: number;
   currentWeightKg: number;
@@ -96,6 +125,8 @@ export type QuoteWithItems = Quote & {
   documentFee: number;
   customsFee: number;
   insuranceFee: number;
+  documents?: QuoteDocument[];
+  accessUrl?: string | null;
   items: QuoteLineItem[];
 };
 export type QuoteLineItem = {
@@ -105,8 +136,57 @@ export type QuoteLineItem = {
   sku: string;
   quantity: number;
   unitPrice: number;
+  sourceUnitPriceCny?: number | null;
+  currency?: "CNY" | "USD";
+  markupPercent?: number;
   amount: number;
   image?: string | null;
+};
+export type QuoteDocumentType = "inquiry_receipt" | "quote_pdf" | "deal_receipt";
+export type QuoteDocument = {
+  id: string;
+  quoteId: string;
+  type: QuoteDocumentType;
+  version: number;
+  title: string;
+  filePath: string;
+  fileHash: string;
+  generatedBy: string;
+  createdAt: string;
+};
+export type QuoteSendRecord = {
+  id: string;
+  quoteId: string;
+  documentId: string | null;
+  channel: "whatsapp" | "email";
+  recipient: string;
+  status: "pending" | "sent" | "failed";
+  accessUrl: string | null;
+  externalId?: string | null;
+  error?: string | null;
+  createdAt: string;
+};
+export type AdminNotification = {
+  id: string;
+  type: "new_inquiry" | "customer_message" | "quote_sent" | "deal_won";
+  title: string;
+  body: string;
+  quoteId: string | null;
+  quoteNo: string | null;
+  customerName: string;
+  whatsapp: string;
+  createdAt: string;
+  unread: boolean;
+};
+export type CustomerAccessToken = {
+  token: string;
+  expiresAt: string;
+  accessUrl: string;
+};
+export type CustomerQuoteAccess = {
+  customer: Pick<CustomerWithStats, "id" | "company" | "contactName" | "email" | "whatsapp">;
+  quotes: Array<QuoteWithItems & { documents: QuoteDocument[] }>;
+  conversations: Conversation[];
 };
 export type QuoteInput = Omit<QuoteWithItems, "quoteNo" | "productCount" | "totalProducts" | "totalAmount"> & {
   quoteNo?: string;
@@ -175,6 +255,31 @@ export type FollowupInput = {
   content: string;
   owner?: string;
   nextFollowUpAt?: string | null;
+};
+export type Conversation = {
+  id: string;
+  customerId: string;
+  quoteId: string | null;
+  assignedUserId: string | null;
+  channel: "whatsapp" | "site";
+  status: "open" | "closed";
+  lastMessageAt: string | null;
+  messages: ConversationMessage[];
+};
+export type ConversationMessage = {
+  id: string;
+  conversationId: string;
+  senderType: "customer" | "admin" | "system";
+  senderId: string | null;
+  sourceLanguage: string;
+  sourceText: string;
+  translatedLanguage: string;
+  translatedText: string;
+  direction: "inbound" | "outbound" | "system";
+  externalMessageId?: string | null;
+  deliveryStatus?: string | null;
+  deliveryError?: string | null;
+  createdAt: string;
 };
 export type SupplierBusinessModel = "生产厂家" | "贸易公司" | "源头工厂";
 export type SupplierShopType = "实力商家" | "1688已采集" | "普通店铺";
@@ -294,6 +399,8 @@ export type StorefrontCatalog = {
   categories: Array<{ id: string; name: string; count: number }>;
 };
 export type StorefrontInquiryInput = {
+  sessionId?: string;
+  currency?: "CNY" | "USD";
   customerName: string;
   company?: string;
   whatsapp: string;
@@ -313,6 +420,24 @@ export type StorefrontInquiryInput = {
     skuIndex: number;
     quantity: number;
   }>;
+};
+export type StorefrontInquiryResult = {
+  quote: QuoteWithItems;
+  receipt: QuoteDocument;
+  access: CustomerAccessToken;
+};
+export type ImportProductsInput = {
+  sourceFile?: string;
+  sourceType?: "catalog-json" | "standard-json";
+};
+export type ImportBatchResult = {
+  id: string;
+  sourceFile: string;
+  status: string;
+  totalRows: number;
+  successRows: number;
+  failedRows: number;
+  createdAt: string;
 };
 export type StorefrontState = {
   sessionId: string;
@@ -376,6 +501,9 @@ async function migrate() {
       role TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS personal_whatsapp TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS whatsapp_owner_enabled BOOLEAN NOT NULL DEFAULT true;
 
     CREATE TABLE IF NOT EXISTS categories (
       id TEXT PRIMARY KEY,
@@ -423,6 +551,38 @@ async function migrate() {
       stock INTEGER NOT NULL,
       image TEXT,
       PRIMARY KEY(id, product_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS product_categories (
+      product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      category_id TEXT NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+      is_primary BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY(product_id, category_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS import_batches (
+      id TEXT PRIMARY KEY,
+      source_file TEXT NOT NULL,
+      source_type TEXT NOT NULL DEFAULT 'standard-json',
+      status TEXT NOT NULL DEFAULT 'completed',
+      total_rows INTEGER NOT NULL DEFAULT 0,
+      success_rows INTEGER NOT NULL DEFAULT 0,
+      failed_rows INTEGER NOT NULL DEFAULT 0,
+      report JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS product_sources (
+      id TEXT PRIMARY KEY,
+      product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      import_batch_id TEXT REFERENCES import_batches(id) ON DELETE SET NULL,
+      source_platform TEXT NOT NULL DEFAULT '1688',
+      source_url TEXT NOT NULL DEFAULT '',
+      source_price NUMERIC(12, 4),
+      source_file TEXT NOT NULL DEFAULT '',
+      source_image TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
     CREATE TABLE IF NOT EXISTS suppliers (
@@ -511,6 +671,8 @@ async function migrate() {
       max_volume_m3 NUMERIC(12, 4) NOT NULL DEFAULT 67.63,
       current_weight_kg NUMERIC(12, 2) NOT NULL DEFAULT 0,
       max_weight_kg NUMERIC(12, 2) NOT NULL DEFAULT 26800,
+      currency TEXT NOT NULL DEFAULT 'USD',
+      exchange_rate NUMERIC(12, 6) NOT NULL DEFAULT 7.24,
       status TEXT NOT NULL DEFAULT '新询价',
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -518,6 +680,8 @@ async function migrate() {
     ALTER TABLE quotes DROP CONSTRAINT IF EXISTS quotes_status_check;
     ALTER TABLE quotes ADD CONSTRAINT quotes_status_check CHECK (status IN ('新询价', '跟进中', '已报价', '已成交', '已关闭'));
     ALTER TABLE quotes ADD COLUMN IF NOT EXISTS customer_id TEXT;
+    ALTER TABLE quotes ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD';
+    ALTER TABLE quotes ADD COLUMN IF NOT EXISTS exchange_rate NUMERIC(12, 6) NOT NULL DEFAULT 7.24;
 
     CREATE TABLE IF NOT EXISTS customers (
       id TEXT PRIMARY KEY,
@@ -571,8 +735,14 @@ async function migrate() {
       sku TEXT NOT NULL,
       quantity INTEGER NOT NULL,
       unit_price NUMERIC(12, 4) NOT NULL,
+      source_unit_price_cny NUMERIC(12, 4),
+      currency TEXT NOT NULL DEFAULT 'USD',
+      markup_percent NUMERIC(12, 4) NOT NULL DEFAULT 0,
       image TEXT
     );
+    ALTER TABLE quote_items ADD COLUMN IF NOT EXISTS source_unit_price_cny NUMERIC(12, 4);
+    ALTER TABLE quote_items ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'USD';
+    ALTER TABLE quote_items ADD COLUMN IF NOT EXISTS markup_percent NUMERIC(12, 4) NOT NULL DEFAULT 0;
 
     CREATE TABLE IF NOT EXISTS storefront_sessions (
       id TEXT PRIMARY KEY,
@@ -595,6 +765,107 @@ async function migrate() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY(session_id, product_id, sku_index)
     );
+
+    CREATE TABLE IF NOT EXISTS exchange_rates (
+      id TEXT PRIMARY KEY,
+      currency_from TEXT NOT NULL,
+      currency_to TEXT NOT NULL,
+      rate NUMERIC(12, 6) NOT NULL,
+      source TEXT NOT NULL DEFAULT 'manual',
+      status TEXT NOT NULL DEFAULT 'active',
+      effective_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS customer_identities (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      identity_type TEXT NOT NULL,
+      identity_value TEXT NOT NULL,
+      verified_at TIMESTAMPTZ,
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE(identity_type, identity_value)
+    );
+
+    CREATE TABLE IF NOT EXISTS quote_documents (
+      id TEXT PRIMARY KEY,
+      quote_id TEXT NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
+      document_type TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      title TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_hash TEXT NOT NULL,
+      generated_by TEXT NOT NULL DEFAULT 'system',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS customer_access_tokens (
+      id TEXT PRIMARY KEY,
+      token_hash TEXT NOT NULL UNIQUE,
+      customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      quote_id TEXT REFERENCES quotes(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_count INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_used_at TIMESTAMPTZ
+    );
+
+    CREATE TABLE IF NOT EXISTS conversations (
+      id TEXT PRIMARY KEY,
+      customer_id TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      quote_id TEXT REFERENCES quotes(id) ON DELETE SET NULL,
+      assigned_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      channel TEXT NOT NULL DEFAULT 'whatsapp',
+      status TEXT NOT NULL DEFAULT 'open',
+      last_message_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS conversation_messages (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      sender_type TEXT NOT NULL,
+      sender_id TEXT,
+      source_language TEXT NOT NULL DEFAULT 'en',
+      source_text TEXT NOT NULL,
+      translated_language TEXT NOT NULL DEFAULT 'zh-CN',
+      translated_text TEXT NOT NULL,
+      direction TEXT NOT NULL DEFAULT 'inbound',
+      external_message_id TEXT,
+      delivery_status TEXT NOT NULL DEFAULT 'local',
+      delivery_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS external_message_id TEXT;
+    ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS delivery_status TEXT NOT NULL DEFAULT 'local';
+    ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS delivery_error TEXT;
+
+    CREATE TABLE IF NOT EXISTS quote_send_records (
+      id TEXT PRIMARY KEY,
+      quote_id TEXT NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
+      document_id TEXT REFERENCES quote_documents(id) ON DELETE SET NULL,
+      channel TEXT NOT NULL DEFAULT 'whatsapp',
+      recipient TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      access_url TEXT,
+      external_message_id TEXT,
+      error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    ALTER TABLE quote_send_records ADD COLUMN IF NOT EXISTS external_message_id TEXT;
+    ALTER TABLE quote_send_records ADD COLUMN IF NOT EXISTS error TEXT;
+
+    CREATE TABLE IF NOT EXISTS email_send_records (
+      id TEXT PRIMARY KEY,
+      quote_id TEXT NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
+      document_id TEXT REFERENCES quote_documents(id) ON DELETE SET NULL,
+      recipient TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
   `);
 }
 
@@ -602,9 +873,16 @@ async function seed() {
   const userCount = await getPool().query<{ count: string }>("SELECT COUNT(*) AS count FROM users");
   if (Number(userCount.rows[0].count) === 0) {
     await getPool().query(
-      `INSERT INTO users (id, username, password, name, email, role)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      ["admin-001", "admin", "admin123", "管理员", "admin@yoursourcing.com", "super_admin"]
+      `INSERT INTO users (id, username, password, name, email, role, display_name, personal_whatsapp, whatsapp_owner_enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)`,
+      ["admin-001", "admin", "admin123", "管理员", "admin@yoursourcing.com", "super_admin", "Luna · 外贸顾问", "+86 138 0000 0000"]
+    );
+  } else {
+    await getPool().query(
+      `UPDATE users
+       SET display_name = COALESCE(NULLIF(display_name, ''), name),
+           personal_whatsapp = COALESCE(NULLIF(personal_whatsapp, ''), '+86 138 0000 0000')
+       WHERE id = 'admin-001'`
     );
   }
 
@@ -653,6 +931,8 @@ async function seed() {
     await seedMarkupRules();
   }
   await seedCatalogProducts();
+  await seedProductCategories();
+  await seedExchangeRates();
   await seedProductMarkups();
   await seedSuppliers();
 }
@@ -690,6 +970,72 @@ export async function listCategoriesFromDb(): Promise<Category[]> {
   }));
 }
 
+export async function importProductsFromStandardSource(input: ImportProductsInput = {}): Promise<ImportBatchResult> {
+  await initDb();
+  const sourceFile = input.sourceFile ?? "src/data/catalog.json";
+  const data = catalogData as {
+    products: Array<{ offerId: string; link?: string; basePrice?: number; image?: string }>;
+  };
+  const batchId = `imp-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8)}`;
+  await getPool().query(
+    `INSERT INTO import_batches (id, source_file, source_type, status, total_rows, success_rows, failed_rows, report)
+     VALUES ($1,$2,$3,'completed',$4,$5,0,$6)`,
+    [
+      batchId,
+      sourceFile,
+      input.sourceType ?? "catalog-json",
+      data.products.length,
+      data.products.length,
+      JSON.stringify({ note: "Phase1 standard catalog import/upsert; products are seeded from catalog data." })
+    ]
+  );
+  await seedCatalogProducts();
+  await seedProductCategories();
+  for (const product of data.products) {
+    await getPool().query(
+      `INSERT INTO product_sources (id, product_id, import_batch_id, source_platform, source_url, source_price, source_file, source_image)
+       VALUES ($1,$2,$3,'1688',$4,$5,$6,$7)
+       ON CONFLICT DO NOTHING`,
+      [
+        `ps-${batchId}-${product.offerId}`,
+        product.offerId,
+        batchId,
+        product.link ?? `https://detail.1688.com/offer/${product.offerId}.html`,
+        Number(product.basePrice ?? 0),
+        sourceFile,
+        product.image ?? ""
+      ]
+    );
+  }
+  return {
+    id: batchId,
+    sourceFile,
+    status: "completed",
+    totalRows: data.products.length,
+    successRows: data.products.length,
+    failedRows: 0,
+    createdAt: formatDbDateTime(new Date().toISOString())
+  };
+}
+
+export async function listImportBatches(): Promise<ImportBatchResult[]> {
+  await initDb();
+  const result = await getPool().query(
+    `SELECT id, source_file AS "sourceFile", status, total_rows AS "totalRows", success_rows AS "successRows", failed_rows AS "failedRows", created_at AS "createdAt"
+     FROM import_batches
+     ORDER BY created_at DESC`
+  );
+  return result.rows.map((row) => ({
+    id: String(row.id),
+    sourceFile: String(row.sourceFile),
+    status: String(row.status),
+    totalRows: Number(row.totalRows),
+    successRows: Number(row.successRows),
+    failedRows: Number(row.failedRows),
+    createdAt: formatDbDateTime(String(row.createdAt))
+  }));
+}
+
 export async function listCategoriesDetailedFromDb(): Promise<CategoryWithMeta[]> {
   await initDb();
   const result = await getPool().query(`
@@ -721,7 +1067,7 @@ export async function createCategory(input: CategoryInput): Promise<CategoryWith
     throw new Error("Parent category not found");
   }
   const id = input.id ?? `cat-${randomUUID()}`;
-  const level = input.level ?? (parent ? Math.min(parent.level + 1, 3) : 1);
+  const level = parent ? Math.min(parent.level + 1, 3) : 1;
   const sortOrder = input.sortOrder ?? await getNextCategorySortOrder(input.parentId ?? null);
   await getPool().query(
     `INSERT INTO categories (
@@ -759,7 +1105,17 @@ export async function updateCategory(id: string, input: Partial<CategoryInput>):
   if (parentId && !parent) {
     throw new Error("Parent category not found");
   }
+  if (parentId && await isCategoryDescendant(parentId, id)) {
+    throw new Error("Category cannot be moved under its descendant");
+  }
   const level = input.level ?? (parent ? Math.min(parent.level + 1, 3) : 1);
+  if (level > 3) {
+    throw new Error("Category level cannot exceed 3");
+  }
+  const descendantDepth = await getCategoryDescendantDepth(id);
+  if (level + descendantDepth > 3) {
+    throw new Error("Category descendants would exceed level 3");
+  }
   await getPool().query(
     `UPDATE categories SET
       name = $2,
@@ -787,7 +1143,34 @@ export async function updateCategory(id: string, input: Partial<CategoryInput>):
       input.metaDescription ?? current.metaDescription
     ]
   );
+  await syncCategoryDescendantLevels(id, level);
   return getCategoryById(id);
+}
+
+async function isCategoryDescendant(categoryId: string, possibleAncestorId: string) {
+  let currentId: string | null = categoryId;
+  while (currentId) {
+    if (currentId === possibleAncestorId) return true;
+    const result: QueryResult<{ parent_id: string | null }> = await getPool().query("SELECT parent_id FROM categories WHERE id = $1", [currentId]);
+    currentId = result.rows[0]?.parent_id ?? null;
+  }
+  return false;
+}
+
+async function getCategoryDescendantDepth(categoryId: string): Promise<number> {
+  const result = await getPool().query<{ id: string }>("SELECT id FROM categories WHERE parent_id = $1", [categoryId]);
+  if (!result.rows.length) return 0;
+  const childDepths = await Promise.all(result.rows.map((row) => getCategoryDescendantDepth(row.id)));
+  return 1 + Math.max(...childDepths);
+}
+
+async function syncCategoryDescendantLevels(categoryId: string, parentLevel: number) {
+  const children = await getPool().query<{ id: string }>("SELECT id FROM categories WHERE parent_id = $1", [categoryId]);
+  for (const child of children.rows) {
+    const childLevel = Math.min(parentLevel + 1, 3);
+    await getPool().query("UPDATE categories SET level = $2 WHERE id = $1", [child.id, childLevel]);
+    await syncCategoryDescendantLevels(child.id, childLevel);
+  }
 }
 
 export async function deleteCategory(id: string) {
@@ -972,22 +1355,26 @@ export async function getProductById(id: string): Promise<ProductWithStatus | nu
   return mapProductRow(row, specs);
 }
 
-export async function listStorefrontProductsFromDb(): Promise<StorefrontCatalog> {
+export async function listStorefrontProductsFromDb(currency: "CNY" | "USD" = "CNY"): Promise<StorefrontCatalog> {
   await initDb();
   const [products, markups] = await Promise.all([listProductsFromDb(), listProductMarkupsFromDb()]);
+  const activeProducts = products.filter((product) => product.status === "active");
+  const exchangeRate = currency === "USD" ? await getExchangeRate("CNY", "USD") : 1;
   const markupByProduct = new Map(markups.map((markup) => [markup.productId, markup]));
   const categoriesFromDb = await listCategoriesFromDb();
   const categories = categoriesFromDb
-    .filter((category) => products.some((product) => product.categoryId === category.id))
-    .map((category) => ({ id: category.id, name: category.name, count: products.filter((product) => product.categoryId === category.id).length }));
+    .filter((category) => activeProducts.some((product) => product.categoryId === category.id))
+    .map((category) => ({ id: category.id, name: category.name, count: activeProducts.filter((product) => product.categoryId === category.id).length }));
   return {
-    products: products.map((product) => productToStorefrontProduct(product, markupByProduct.get(product.id))),
+    products: activeProducts.map((product) => productToStorefrontProduct(product, markupByProduct.get(product.id), currency, exchangeRate)),
     categories
   };
 }
 
-export async function createStorefrontInquiry(input: StorefrontInquiryInput): Promise<QuoteWithItems> {
+export async function createStorefrontInquiry(input: StorefrontInquiryInput): Promise<StorefrontInquiryResult> {
   await initDb();
+  const currency = input.currency ?? "USD";
+  const exchangeRate = await getExchangeRate("CNY", "USD");
   const products = await listProductsFromDb();
   const markups = await listProductMarkupsFromDb();
   const markupByProduct = new Map(markups.map((markup) => [markup.productId, markup]));
@@ -996,7 +1383,9 @@ export async function createStorefrontInquiry(input: StorefrontInquiryInput): Pr
     if (!product) return [];
     const spec = product.specs[item.skuIndex] ?? product.specs[0];
     const quantity = Math.max(1, Number(item.quantity || product.moq || 1));
-    const unitPrice = applyMarkupToPrice(Number(spec?.price ?? product.price), markupByProduct.get(product.id));
+    const sourceUnitPriceCny = Number(spec?.price ?? product.price);
+    const markedPriceCny = applyMarkupToPrice(sourceUnitPriceCny, markupByProduct.get(product.id));
+    const unitPrice = currency === "USD" ? Number((markedPriceCny * exchangeRate).toFixed(4)) : markedPriceCny;
     return [{
       id: `qi-store-${randomUUID()}`,
       productId: product.id,
@@ -1004,6 +1393,9 @@ export async function createStorefrontInquiry(input: StorefrontInquiryInput): Pr
       sku: spec?.id && spec.id !== "s1" ? `${product.sku}-${spec.id}` : product.sku,
       quantity,
       unitPrice,
+      sourceUnitPriceCny,
+      currency,
+      markupPercent: markupByProduct.get(product.id)?.markupPercent ?? 0,
       amount: quantity * unitPrice,
       image: spec?.image ?? product.image
     }];
@@ -1013,8 +1405,9 @@ export async function createStorefrontInquiry(input: StorefrontInquiryInput): Pr
   }
   const productAmount = input.totals?.productAmount ?? items.reduce((sum, item) => sum + item.amount, 0);
   const shippingFee = input.totals?.shippingFee ?? 0;
+  const productOnlyInquiry = input.containerType === "Product Inquiry";
   const id = `QT-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${String(Math.floor(Math.random() * 900) + 100)}`;
-  return createQuote({
+  const quote = await createQuote({
     id,
     quoteNo: id,
     customerName: input.customerName,
@@ -1026,12 +1419,14 @@ export async function createStorefrontInquiry(input: StorefrontInquiryInput): Pr
     whatsapp: input.whatsapp,
     email: input.email || `${id.toLowerCase()}@customer.local`,
     containerType: input.containerType,
+    currency,
+    exchangeRate: currency === "USD" ? 7.24 : 1,
     productAmount,
     shippingFee,
-    localFee: 320,
-    documentFee: 90,
-    customsFee: 145,
-    insuranceFee: productAmount * 0.003,
+    localFee: productOnlyInquiry ? 0 : 320,
+    documentFee: productOnlyInquiry ? 0 : 90,
+    customsFee: productOnlyInquiry ? 0 : 145,
+    insuranceFee: productOnlyInquiry ? 0 : productAmount * 0.003,
     loadedVolumeM3: input.totals?.volume ?? 0,
     maxVolumeM3: input.containerType === "20GP" ? 28 : input.containerType === "40HQ" ? 76.3 : input.containerType === "45HQ" ? 86 : 67.63,
     currentWeightKg: input.totals?.weight ?? 0,
@@ -1040,6 +1435,24 @@ export async function createStorefrontInquiry(input: StorefrontInquiryInput): Pr
     createdAt: new Date().toISOString(),
     items
   });
+  const customerId = quote.customerId ?? (await getCustomerIdByQuoteId(quote.id));
+  if (customerId) {
+    await bindCustomerIdentities(customerId, {
+      sessionId: input.sessionId,
+      email: quote.email,
+      whatsapp: quote.whatsapp
+    });
+    await ensureConversation({
+      customerId,
+      quoteId: quote.id,
+      channel: "whatsapp",
+      initialMessage: `客户提交询盘 ${quote.quoteNo}，共 ${quote.productCount} 种产品。`
+    });
+  }
+  const receipt = await generateQuoteDocument(quote.id, "inquiry_receipt", "system");
+  await createEmailSendRecord(quote.id, receipt.id, quote.email, `Inquiry received: ${quote.quoteNo}`);
+  const access = await createCustomerAccessToken(customerId, quote.id);
+  return { quote: { ...quote, accessUrl: access.accessUrl }, receipt, access };
 }
 
 export async function getStorefrontState(sessionId?: string): Promise<StorefrontState> {
@@ -1124,6 +1537,14 @@ export async function createStorefrontMessage(input: StorefrontMessageInput): Pr
     status: "跟进中",
     group: "潜在客户",
     notes: `前台沟通窗口访客${input.sessionId ? `，session: ${input.sessionId}` : ""}`
+  });
+  await bindCustomerIdentities(customerId, { sessionId: input.sessionId, email: input.email, whatsapp: input.whatsapp });
+  await ensureConversation({
+    customerId,
+    quoteId: input.quoteId ?? null,
+    channel: "site",
+    initialMessage: input.message,
+    senderType: "customer"
   });
   return createFollowup({
     customerId,
@@ -1369,8 +1790,8 @@ export async function listProductMarkupsFromDb(): Promise<ProductMarkup[]> {
       p.price AS "originalPrice",
       pm.rule_id AS "ruleId",
       r.name AS "ruleName",
-      COALESCE(pm.markup_percent, 0) AS "markupPercent",
-      COALESCE(pm.status, 'unset') AS status,
+      CASE WHEN r.status = 'inactive' THEN 0 ELSE COALESCE(pm.markup_percent, 0) END AS "markupPercent",
+      CASE WHEN r.status = 'inactive' THEN 'unset' ELSE COALESCE(pm.status, 'unset') END AS status,
       pm.applied_at AS "appliedAt"
     FROM products p
     JOIN categories c ON c.id = p.category_id
@@ -1379,6 +1800,137 @@ export async function listProductMarkupsFromDb(): Promise<ProductMarkup[]> {
     ORDER BY p.created_at DESC, p.id ASC
   `);
   return result.rows.map(mapProductMarkupRow);
+}
+
+export async function listProductMarkupsPageFromDb(input: ProductMarkupListInput = {}): Promise<ProductMarkupListResult> {
+  await initDb();
+  const pageSize = Math.min(Math.max(Number(input.pageSize ?? 10), 1), 100);
+  const requestedPage = Math.max(Number(input.page ?? 1), 1);
+  const params: unknown[] = [];
+  const where: string[] = [];
+
+  if (input.query?.trim()) {
+    params.push(`%${input.query.trim().toLowerCase()}%`);
+    where.push(`(LOWER(p.name) LIKE $${params.length} OR LOWER(p.name_en) LIKE $${params.length} OR LOWER(p.sku) LIKE $${params.length})`);
+  }
+
+  if (input.categoryId && input.categoryId !== "all") {
+    params.push(input.categoryId);
+    where.push(`(
+      p.category_id IN (
+        WITH RECURSIVE category_tree AS (
+          SELECT id FROM categories WHERE id = $${params.length}
+          UNION ALL
+          SELECT c.id FROM categories c
+          JOIN category_tree tree ON c.parent_id = tree.id
+        )
+        SELECT id FROM category_tree
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM product_categories pc
+        WHERE pc.product_id = p.id
+          AND pc.category_id IN (
+            WITH RECURSIVE category_tree AS (
+              SELECT id FROM categories WHERE id = $${params.length}
+              UNION ALL
+              SELECT c.id FROM categories c
+              JOIN category_tree tree ON c.parent_id = tree.id
+            )
+            SELECT id FROM category_tree
+          )
+      )
+    )`);
+  }
+
+  if (input.status && input.status !== "all") {
+    params.push(input.status);
+    where.push(`(CASE WHEN r.status = 'inactive' THEN 'unset' ELSE COALESCE(pm.status, 'unset') END) = $${params.length}`);
+  }
+
+  if (input.ruleId && input.ruleId !== "all") {
+    if (input.ruleId === "none") {
+      where.push("pm.rule_id IS NULL");
+    } else {
+      params.push(input.ruleId);
+      where.push(`pm.rule_id = $${params.length}`);
+    }
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const countResult = await getPool().query<{ total: string }>(
+    `SELECT COUNT(*) AS total
+     FROM products p
+     JOIN categories c ON c.id = p.category_id
+     LEFT JOIN product_markups pm ON pm.product_id = p.id
+     LEFT JOIN markup_rules r ON r.id = pm.rule_id
+     ${whereSql}`,
+    params
+  );
+  const total = Number(countResult.rows[0]?.total ?? 0);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(requestedPage, totalPages);
+  const offset = (page - 1) * pageSize;
+
+  const [productsResult, metricsResult] = await Promise.all([
+    getPool().query(
+      `SELECT
+        p.id AS "productId",
+        p.sku,
+        p.name,
+        p.name_en AS "nameEn",
+        p.image,
+        p.category_id AS "categoryId",
+        c.name AS "categoryName",
+        p.price AS "originalPrice",
+        pm.rule_id AS "ruleId",
+        r.name AS "ruleName",
+        CASE WHEN r.status = 'inactive' THEN 0 ELSE COALESCE(pm.markup_percent, 0) END AS "markupPercent",
+        CASE WHEN r.status = 'inactive' THEN 'unset' ELSE COALESCE(pm.status, 'unset') END AS status,
+        pm.applied_at AS "appliedAt"
+       FROM products p
+       JOIN categories c ON c.id = p.category_id
+       LEFT JOIN product_markups pm ON pm.product_id = p.id
+       LEFT JOIN markup_rules r ON r.id = pm.rule_id
+       ${whereSql}
+       ORDER BY p.created_at DESC, p.id ASC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pageSize, offset]
+    ),
+    getPool().query<{ total: string; configured: string; applied: string; unset: string }>(
+      `SELECT
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE status_value <> 'unset') AS configured,
+        COUNT(*) FILTER (WHERE status_value = 'applied') AS applied,
+        COUNT(*) FILTER (WHERE status_value = 'unset') AS unset
+       FROM (
+        SELECT CASE WHEN r.status = 'inactive' THEN 'unset' ELSE COALESCE(pm.status, 'unset') END AS status_value
+        FROM products p
+        JOIN categories c ON c.id = p.category_id
+        LEFT JOIN product_markups pm ON pm.product_id = p.id
+        LEFT JOIN markup_rules r ON r.id = pm.rule_id
+        ${whereSql}
+       ) filtered`,
+      params
+    )
+  ]);
+
+  const metricsRow = metricsResult.rows[0];
+  return {
+    products: productsResult.rows.map(mapProductMarkupRow),
+    pagination: {
+      total,
+      page,
+      pageSize,
+      totalPages
+    },
+    metrics: {
+      total: Number(metricsRow?.total ?? 0),
+      configured: Number(metricsRow?.configured ?? 0),
+      applied: Number(metricsRow?.applied ?? 0),
+      unset: Number(metricsRow?.unset ?? 0)
+    }
+  };
 }
 
 export async function createMarkupRule(input: MarkupRuleInput): Promise<MarkupRule> {
@@ -1401,6 +1953,9 @@ export async function createMarkupRule(input: MarkupRuleInput): Promise<MarkupRu
   );
   const rule = (await listMarkupRulesFromDb()).find((entry) => entry.id === id);
   if (!rule) throw new Error("Markup rule creation failed");
+  if (rule.status === "active") {
+    await syncMarkupRuleApplication(rule.id);
+  }
   return rule;
 }
 
@@ -1432,6 +1987,7 @@ export async function updateMarkupRule(id: string, input: Partial<MarkupRuleInpu
       input.description ?? current.description
     ]
   );
+  await syncMarkupRuleApplication(id);
   return (await listMarkupRulesFromDb()).find((entry) => entry.id === id) ?? null;
 }
 
@@ -1467,16 +2023,32 @@ export async function applyMarkupRuleToProducts(ruleId: string, productIds?: str
   const rule = (await listMarkupRulesFromDb()).find((entry) => entry.id === ruleId);
   if (!rule) return { ok: false, count: 0 };
   const params: unknown[] = [rule.id, rule.value];
+  let prefix = "";
   let filter = "";
   if (productIds?.length) {
     params.push(productIds);
     filter = "AND p.id = ANY($3)";
   } else if (rule.scope === "category" && rule.categoryId) {
     params.push(rule.categoryId);
-    filter = "AND p.category_id = $3";
+    prefix = `WITH RECURSIVE category_tree AS (
+      SELECT id FROM categories WHERE id = $3
+      UNION ALL
+      SELECT c.id FROM categories c
+      JOIN category_tree tree ON c.parent_id = tree.id
+    )`;
+    filter = `AND (
+      p.category_id IN (SELECT id FROM category_tree)
+      OR EXISTS (
+        SELECT 1
+        FROM product_categories pc
+        WHERE pc.product_id = p.id
+          AND pc.category_id IN (SELECT id FROM category_tree)
+      )
+    )`;
   }
   const result = await getPool().query(
-    `INSERT INTO product_markups (product_id, rule_id, markup_percent, status, applied_at)
+    `${prefix}
+     INSERT INTO product_markups (product_id, rule_id, markup_percent, status, applied_at)
      SELECT p.id, $1, $2, 'applied', now()
      FROM products p
      WHERE p.status = 'active' ${filter}
@@ -1488,6 +2060,84 @@ export async function applyMarkupRuleToProducts(ruleId: string, productIds?: str
     params
   );
   return { ok: true, count: result.rowCount ?? 0 };
+}
+
+async function syncMarkupRuleApplication(ruleId: string) {
+  const rule = (await listMarkupRulesFromDb()).find((entry) => entry.id === ruleId);
+  if (!rule) return { ok: false, count: 0 };
+
+  if (rule.status === "inactive") {
+    const result = await getPool().query(
+      `UPDATE product_markups
+       SET markup_percent = 0,
+           status = 'unset',
+           applied_at = NULL
+       WHERE rule_id = $1`,
+      [ruleId]
+    );
+    return { ok: true, count: result.rowCount ?? 0 };
+  }
+
+  const params: unknown[] = [rule.id, rule.value];
+  let matchCondition = "TRUE";
+  let categoryCte = "";
+  if (rule.scope === "category" && rule.categoryId) {
+    params.push(rule.categoryId);
+    categoryCte = `WITH RECURSIVE category_tree AS (
+      SELECT id FROM categories WHERE id = $3
+      UNION ALL
+      SELECT c.id FROM categories c
+      JOIN category_tree tree ON c.parent_id = tree.id
+    )`;
+    matchCondition = `(
+      p.category_id IN (SELECT id FROM category_tree)
+      OR EXISTS (
+        SELECT 1
+        FROM product_categories pc
+        WHERE pc.product_id = p.id
+          AND pc.category_id IN (SELECT id FROM category_tree)
+      )
+    )`;
+  }
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `${categoryCte}
+       UPDATE product_markups pm
+       SET rule_id = NULL,
+           markup_percent = 0,
+           status = 'unset',
+           applied_at = NULL
+       FROM products p
+       WHERE pm.product_id = p.id
+         AND pm.rule_id = $1
+         AND NOT (${matchCondition})`,
+      rule.scope === "category" && rule.categoryId ? params : [rule.id]
+    );
+    const result = await client.query(
+      `${categoryCte}
+       INSERT INTO product_markups (product_id, rule_id, markup_percent, status, applied_at)
+       SELECT p.id, $1, $2, 'applied', now()
+       FROM products p
+       WHERE p.status = 'active'
+         AND ${matchCondition}
+       ON CONFLICT (product_id) DO UPDATE SET
+         rule_id = EXCLUDED.rule_id,
+         markup_percent = EXCLUDED.markup_percent,
+         status = 'applied',
+         applied_at = now()`,
+      params
+    );
+    await client.query("COMMIT");
+    return { ok: true, count: result.rowCount ?? 0 };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function clearProductMarkups(productIds?: string[]) {
@@ -1510,6 +2160,7 @@ export async function listQuotesFromDb(): Promise<QuoteWithItems[]> {
     SELECT
       id,
       quote_no AS "quoteNo",
+      customer_id AS "customerId",
       customer_name AS "customerName",
       contact_name AS "contactName",
       company,
@@ -1528,13 +2179,26 @@ export async function listQuotesFromDb(): Promise<QuoteWithItems[]> {
       max_volume_m3 AS "maxVolumeM3",
       current_weight_kg AS "currentWeightKg",
       max_weight_kg AS "maxWeightKg",
+      currency,
+      exchange_rate AS "exchangeRate",
       status,
       created_at AS "createdAt"
     FROM quotes
     ORDER BY created_at DESC, quote_no ASC
   `);
   const itemResult = await getPool().query(`
-    SELECT id, quote_id AS "quoteId", product_id AS "productId", name, sku, quantity, unit_price AS "unitPrice", image
+    SELECT
+      id,
+      quote_id AS "quoteId",
+      product_id AS "productId",
+      name,
+      sku,
+      quantity,
+      unit_price AS "unitPrice",
+      source_unit_price_cny AS "sourceUnitPriceCny",
+      currency,
+      markup_percent AS "markupPercent",
+      image
     FROM quote_items
     ORDER BY quote_id, id
   `);
@@ -1573,6 +2237,436 @@ export async function deleteQuote(id: string) {
   await initDb();
   const result = await getPool().query("DELETE FROM quotes WHERE id = $1", [id]);
   return (result.rowCount ?? 0) > 0;
+}
+
+export async function generateQuoteDocument(quoteId: string, type: QuoteDocumentType, generatedBy = "system"): Promise<QuoteDocument> {
+  await initDb();
+  const quote = await getQuoteById(quoteId);
+  if (!quote) throw new Error("Quote not found");
+  const versionResult = await getPool().query<{ version: string }>(
+    "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM quote_documents WHERE quote_id = $1 AND document_type = $2",
+    [quoteId, type]
+  );
+  const version = Number(versionResult.rows[0]?.version ?? 1);
+  const id = `doc-${randomUUID()}`;
+  const title = type === "inquiry_receipt"
+    ? `Inquiry Receipt ${quote.quoteNo}`
+    : type === "deal_receipt"
+      ? `Deal Receipt ${quote.quoteNo}`
+      : `Quotation ${quote.quoteNo}`;
+  const html = renderQuoteDocumentHtml(quote, type, version);
+  const fileHash = createHash("sha256").update(html).digest("hex");
+  const dir = path.join(process.cwd(), "public", "generated", "quotes", quote.id);
+  await mkdir(dir, { recursive: true });
+  const fileName = `${type}-v${version}.html`;
+  const diskPath = path.join(dir, fileName);
+  const publicPath = `/generated/quotes/${quote.id}/${fileName}`;
+  await writeFile(diskPath, html, "utf8");
+  await getPool().query(
+    `INSERT INTO quote_documents (id, quote_id, document_type, version, title, file_path, file_hash, generated_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [id, quote.id, type, version, title, publicPath, fileHash, generatedBy]
+  );
+  const document = await getQuoteDocumentById(id);
+  if (!document) throw new Error("Quote document creation failed");
+  return document;
+}
+
+export async function getQuoteDocumentById(id: string): Promise<QuoteDocument | null> {
+  await initDb();
+  const result = await getPool().query(
+    `SELECT id, quote_id AS "quoteId", document_type AS type, version, title, file_path AS "filePath", file_hash AS "fileHash", generated_by AS "generatedBy", created_at AS "createdAt"
+     FROM quote_documents
+     WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0] ? mapQuoteDocumentRow(result.rows[0]) : null;
+}
+
+export async function listQuoteDocuments(quoteId: string): Promise<QuoteDocument[]> {
+  await initDb();
+  const result = await getPool().query(
+    `SELECT id, quote_id AS "quoteId", document_type AS type, version, title, file_path AS "filePath", file_hash AS "fileHash", generated_by AS "generatedBy", created_at AS "createdAt"
+     FROM quote_documents
+     WHERE quote_id = $1
+     ORDER BY created_at DESC`,
+    [quoteId]
+  );
+  return result.rows.map(mapQuoteDocumentRow);
+}
+
+export async function createQuoteSendRecord(quoteId: string, documentId?: string | null, mode: "quote" | "deal" = "quote"): Promise<QuoteSendRecord> {
+  await initDb();
+  const quote = await getQuoteById(quoteId);
+  if (!quote) throw new Error("Quote not found");
+  const customerId = quote.customerId ?? await getCustomerIdByQuoteId(quoteId);
+  const access = await createCustomerAccessToken(customerId, quoteId);
+  const id = `send-${randomUUID()}`;
+  const text = mode === "deal"
+    ? `您好，${quote.company} 的成交回执已生成：${absoluteAppUrl(access.accessUrl)}。成交单号 ${quote.quoteNo}，金额 ${quote.currency} ${quote.totalAmount.toFixed(2)}。`
+    : `您好，${quote.company} 的正式报价单已生成：${absoluteAppUrl(access.accessUrl)}。报价单号 ${quote.quoteNo}，金额 ${quote.currency} ${quote.totalAmount.toFixed(2)}。`;
+  const sendResult = await sendWhatsAppText(quote.whatsapp, text);
+  await getPool().query(
+    `INSERT INTO quote_send_records (id, quote_id, document_id, channel, recipient, status, access_url, external_message_id, error)
+     VALUES ($1,$2,$3,'whatsapp',$4,$5,$6,$7,$8)`,
+    [id, quoteId, documentId ?? null, quote.whatsapp, sendResult.status, access.accessUrl, sendResult.externalId, sendResult.error]
+  );
+  await updateQuote(quoteId, { ...quote, status: mode === "deal" ? "已成交" : "已报价" });
+  const result = await getPool().query(
+    `SELECT id, quote_id AS "quoteId", document_id AS "documentId", channel, recipient, status, access_url AS "accessUrl", external_message_id AS "externalId", error, created_at AS "createdAt"
+     FROM quote_send_records WHERE id = $1`,
+    [id]
+  );
+  return mapQuoteSendRecordRow(result.rows[0]);
+}
+
+export async function closeQuoteWon(quoteId: string, generatedBy = "admin") {
+  await initDb();
+  const quote = await getQuoteById(quoteId);
+  if (!quote) throw new Error("Quote not found");
+  const updated = await updateQuote(quoteId, { ...quote, status: "已成交" });
+  if (!updated) throw new Error("Quote not found");
+  const document = await generateQuoteDocument(quoteId, "deal_receipt", generatedBy);
+  const record = await createQuoteSendRecord(quoteId, document.id, "deal");
+  const customerId = updated.customerId ?? await getCustomerIdByQuoteId(quoteId);
+  if (customerId) {
+    await getPool().query(
+      `INSERT INTO customer_followups (id, customer_id, quote_id, followup_type, followup_status, content, owner)
+       VALUES ($1,$2,$3,'订单确认','已成交',$4,'系统')`,
+      [`fu-${randomUUID()}`, customerId, quoteId, `报价单 ${updated.quoteNo} 已转为成交，并生成成交回执。`]
+    );
+  }
+  return { quote: await getQuoteById(quoteId), document, record };
+}
+
+function absoluteAppUrl(pathname: string) {
+  const base = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+  return pathname.startsWith("http") ? pathname : `${base}${pathname}`;
+}
+
+export async function createCustomerAccessToken(customerId: string | null | undefined, quoteId?: string | null): Promise<CustomerAccessToken> {
+  await initDb();
+  if (!customerId) throw new Error("Customer is required for access token");
+  const token = randomBytes(32).toString("base64url");
+  const tokenHash = hashToken(token);
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  await getPool().query(
+    `INSERT INTO customer_access_tokens (id, token_hash, customer_id, quote_id, expires_at)
+     VALUES ($1,$2,$3,$4,$5)`,
+    [`cat-${randomUUID()}`, tokenHash, customerId, quoteId ?? null, expiresAt.toISOString()]
+  );
+  return {
+    token,
+    expiresAt: expiresAt.toISOString(),
+    accessUrl: `/customer/access?token=${encodeURIComponent(token)}`
+  };
+}
+
+export async function getCustomerQuoteAccess(token: string): Promise<CustomerQuoteAccess | null> {
+  await initDb();
+  const tokenHash = hashToken(token);
+  const tokenResult = await getPool().query<{ customer_id: string }>(
+    `UPDATE customer_access_tokens
+     SET used_count = used_count + 1, last_used_at = now()
+     WHERE token_hash = $1 AND expires_at > now()
+     RETURNING customer_id`,
+    [tokenHash]
+  );
+  const customerId = tokenResult.rows[0]?.customer_id;
+  if (!customerId) return null;
+  const customers = await listCustomersFromDb();
+  const customer = customers.find((entry) => entry.id === customerId);
+  if (!customer) return null;
+  const quoteRows = (await listQuotesFromDb()).filter((quote) => quote.customerId === customerId || quote.email === customer.email);
+  const quotes = await Promise.all(quoteRows.map(async (quote) => ({ ...quote, documents: await listQuoteDocuments(quote.id) })));
+  const conversations = await listConversationsForCustomer(customerId);
+  return {
+    customer: {
+      id: customer.id,
+      company: customer.company,
+      contactName: customer.contactName,
+      email: customer.email,
+      whatsapp: customer.whatsapp
+    },
+    quotes,
+    conversations
+  };
+}
+
+export async function recoverCustomerAccess(quoteNo: string, identity: string): Promise<CustomerAccessToken | null> {
+  await initDb();
+  const quote = (await listQuotesFromDb()).find((entry) => entry.quoteNo === quoteNo);
+  if (!quote) return null;
+  const normalized = identity.trim().toLowerCase();
+  if (quote.email.toLowerCase() !== normalized && quote.whatsapp.toLowerCase() !== normalized) return null;
+  const customerId = quote.customerId ?? await getCustomerIdByQuoteId(quote.id);
+  return createCustomerAccessToken(customerId, quote.id);
+}
+
+export async function listConversationsForCustomer(customerId: string): Promise<Conversation[]> {
+  await initDb();
+  const conversationResult = await getPool().query(
+    `SELECT id, customer_id AS "customerId", quote_id AS "quoteId", assigned_user_id AS "assignedUserId", channel, status, last_message_at AS "lastMessageAt"
+     FROM conversations
+     WHERE customer_id = $1
+     ORDER BY COALESCE(last_message_at, now()) DESC`,
+    [customerId]
+  );
+  const ids = conversationResult.rows.map((row) => String(row.id));
+  if (!ids.length) return [];
+  const messageResult = await getPool().query(
+    `SELECT id, conversation_id AS "conversationId", sender_type AS "senderType", sender_id AS "senderId", source_language AS "sourceLanguage", source_text AS "sourceText", translated_language AS "translatedLanguage", translated_text AS "translatedText", direction, external_message_id AS "externalMessageId", delivery_status AS "deliveryStatus", delivery_error AS "deliveryError", created_at AS "createdAt"
+     FROM conversation_messages
+     WHERE conversation_id = ANY($1)
+     ORDER BY created_at ASC`,
+    [ids]
+  );
+  const messagesByConversation = new Map<string, ConversationMessage[]>();
+  messageResult.rows.forEach((row) => {
+    const message = mapConversationMessageRow(row);
+    messagesByConversation.set(message.conversationId, [...(messagesByConversation.get(message.conversationId) ?? []), message]);
+  });
+  return conversationResult.rows.map((row) => mapConversationRow(row, messagesByConversation.get(String(row.id)) ?? []));
+}
+
+export async function listAdminConversations(): Promise<Array<Conversation & {
+  customerName: string;
+  company: string;
+  whatsapp: string;
+  email: string;
+  quoteNo: string | null;
+}>> {
+  await initDb();
+  const conversationResult = await getPool().query(`
+    SELECT
+      cv.id,
+      cv.customer_id AS "customerId",
+      cv.quote_id AS "quoteId",
+      cv.assigned_user_id AS "assignedUserId",
+      cv.channel,
+      cv.status,
+      cv.last_message_at AS "lastMessageAt",
+      c.contact_name AS "customerName",
+      c.company,
+      c.whatsapp,
+      c.email,
+      q.quote_no AS "quoteNo"
+    FROM conversations cv
+    JOIN customers c ON c.id = cv.customer_id
+    LEFT JOIN quotes q ON q.id = cv.quote_id
+    ORDER BY COALESCE(cv.last_message_at, cv.created_at) DESC
+  `);
+  const ids = conversationResult.rows.map((row) => String(row.id));
+  if (!ids.length) return [];
+  const messageResult = await getPool().query(
+    `SELECT id, conversation_id AS "conversationId", sender_type AS "senderType", sender_id AS "senderId", source_language AS "sourceLanguage", source_text AS "sourceText", translated_language AS "translatedLanguage", translated_text AS "translatedText", direction, external_message_id AS "externalMessageId", delivery_status AS "deliveryStatus", delivery_error AS "deliveryError", created_at AS "createdAt"
+     FROM conversation_messages
+     WHERE conversation_id = ANY($1)
+     ORDER BY created_at ASC`,
+    [ids]
+  );
+  const messagesByConversation = new Map<string, ConversationMessage[]>();
+  messageResult.rows.forEach((row) => {
+    const message = mapConversationMessageRow(row);
+    messagesByConversation.set(message.conversationId, [...(messagesByConversation.get(message.conversationId) ?? []), message]);
+  });
+  return conversationResult.rows.map((row) => ({
+    ...mapConversationRow(row, messagesByConversation.get(String(row.id)) ?? []),
+    customerName: String(row.customerName),
+    company: String(row.company),
+    whatsapp: String(row.whatsapp),
+    email: String(row.email),
+    quoteNo: row.quoteNo ? String(row.quoteNo) : null
+  }));
+}
+
+export async function listConversationMessages(conversationId: string): Promise<ConversationMessage[]> {
+  await initDb();
+  const result = await getPool().query(
+    `SELECT id, conversation_id AS "conversationId", sender_type AS "senderType", sender_id AS "senderId", source_language AS "sourceLanguage", source_text AS "sourceText", translated_language AS "translatedLanguage", translated_text AS "translatedText", direction, external_message_id AS "externalMessageId", delivery_status AS "deliveryStatus", delivery_error AS "deliveryError", created_at AS "createdAt"
+     FROM conversation_messages
+     WHERE conversation_id = $1
+     ORDER BY created_at ASC`,
+    [conversationId]
+  );
+  return result.rows.map(mapConversationMessageRow);
+}
+
+async function getConversationContact(conversationId: string) {
+  const result = await getPool().query<{ whatsapp: string }>(
+    `SELECT c.whatsapp
+     FROM conversations cv
+     JOIN customers c ON c.id = cv.customer_id
+     WHERE cv.id = $1`,
+    [conversationId]
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function createConversationMessage(input: {
+  conversationId: string;
+  senderType: "customer" | "admin" | "system";
+  senderId?: string | null;
+  sourceLanguage?: string;
+  sourceText: string;
+  translatedLanguage?: string;
+  translatedText?: string;
+  direction?: "inbound" | "outbound" | "system";
+}): Promise<ConversationMessage> {
+  await initDb();
+  const id = `msg-${randomUUID()}`;
+  const contact = input.senderType === "admin" ? await getConversationContact(input.conversationId) : null;
+  const sendResult = contact
+    ? await sendWhatsAppText(contact.whatsapp, input.sourceText)
+    : { status: "local", externalId: null, error: null };
+  await getPool().query(
+    `INSERT INTO conversation_messages (
+      id, conversation_id, sender_type, sender_id, source_language, source_text,
+      translated_language, translated_text, direction, external_message_id, delivery_status, delivery_error
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [
+      id,
+      input.conversationId,
+      input.senderType,
+      input.senderId ?? null,
+      input.sourceLanguage ?? "zh-CN",
+      input.sourceText,
+      input.translatedLanguage ?? "zh-CN",
+      input.translatedText ?? input.sourceText,
+      input.direction ?? (input.senderType === "customer" ? "inbound" : input.senderType === "admin" ? "outbound" : "system"),
+      sendResult.externalId,
+      sendResult.status,
+      sendResult.error
+    ]
+  );
+  await getPool().query("UPDATE conversations SET last_message_at = now() WHERE id = $1", [input.conversationId]);
+  const message = (await listConversationMessages(input.conversationId)).find((entry) => entry.id === id);
+  if (!message) throw new Error("Conversation message creation failed");
+  return message;
+}
+
+export async function listAdminNotifications(): Promise<{ unreadCount: number; items: AdminNotification[] }> {
+  await initDb();
+  const quoteRows = await getPool().query(`
+    SELECT id, quote_no AS "quoteNo", company, contact_name AS "customerName", whatsapp, status, created_at AS "createdAt"
+    FROM quotes
+    WHERE status IN ('新询价', '跟进中', '已成交')
+    ORDER BY created_at DESC
+    LIMIT 20
+  `);
+  const messageRows = await getPool().query(`
+    SELECT cm.id, cm.source_text AS "body", cm.created_at AS "createdAt", c.company, c.contact_name AS "customerName", c.whatsapp, q.id AS "quoteId", q.quote_no AS "quoteNo"
+    FROM conversation_messages cm
+    JOIN conversations cv ON cv.id = cm.conversation_id
+    JOIN customers c ON c.id = cv.customer_id
+    LEFT JOIN quotes q ON q.id = cv.quote_id
+    WHERE cm.direction = 'inbound'
+    ORDER BY cm.created_at DESC
+    LIMIT 20
+  `);
+  const sendRows = await getPool().query(`
+    SELECT sr.id, sr.status, sr.created_at AS "createdAt", q.id AS "quoteId", q.quote_no AS "quoteNo", q.company, q.contact_name AS "customerName", q.whatsapp
+    FROM quote_send_records sr
+    JOIN quotes q ON q.id = sr.quote_id
+    ORDER BY sr.created_at DESC
+    LIMIT 20
+  `);
+  const items: AdminNotification[] = [
+    ...quoteRows.rows.map((row): AdminNotification => ({
+      id: `quote-${String(row.id)}`,
+      type: row.status === "已成交" ? "deal_won" : "new_inquiry",
+      title: row.status === "已成交" ? "报价已成交" : "新询价待处理",
+      body: `${String(row.company)} · ${String(row.status)}`,
+      quoteId: String(row.id),
+      quoteNo: String(row.quoteNo),
+      customerName: String(row.customerName),
+      whatsapp: String(row.whatsapp),
+      createdAt: formatDbDateTime(String(row.createdAt)),
+      unread: row.status === "新询价"
+    })),
+    ...messageRows.rows.map((row): AdminNotification => ({
+      id: `msg-${String(row.id)}`,
+      type: "customer_message",
+      title: "客户 WhatsApp 消息",
+      body: String(row.body),
+      quoteId: row.quoteId ? String(row.quoteId) : null,
+      quoteNo: row.quoteNo ? String(row.quoteNo) : null,
+      customerName: String(row.customerName),
+      whatsapp: String(row.whatsapp),
+      createdAt: formatDbDateTime(String(row.createdAt)),
+      unread: true
+    })),
+    ...sendRows.rows.map((row): AdminNotification => ({
+      id: `send-${String(row.id)}`,
+      type: "quote_sent",
+      title: row.status === "sent" ? "报价已发送" : "报价待手动发送",
+      body: `${String(row.company)} · ${String(row.status)}`,
+      quoteId: String(row.quoteId),
+      quoteNo: String(row.quoteNo),
+      customerName: String(row.customerName),
+      whatsapp: String(row.whatsapp),
+      createdAt: formatDbDateTime(String(row.createdAt)),
+      unread: false
+    }))
+  ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 30);
+  return {
+    unreadCount: items.filter((item) => item.unread).length,
+    items
+  };
+}
+
+export async function recordInboundWhatsAppMessage(input: {
+  from: string;
+  text: string;
+  externalMessageId?: string | null;
+  timestamp?: string | null;
+}) {
+  await initDb();
+  const normalized = normalizeWhatsapp(input.from);
+  const identity = await getPool().query<{ customer_id: string }>(
+    `SELECT customer_id FROM customer_identities
+     WHERE identity_type = 'whatsapp'
+       AND regexp_replace(identity_value, '[^0-9]', '', 'g') = $1
+     LIMIT 1`,
+    [normalized]
+  );
+  let customerId = identity.rows[0]?.customer_id;
+  if (!customerId) {
+    customerId = await upsertCustomerFromQuote({
+      company: `WhatsApp ${normalized}`,
+      contactName: `WhatsApp ${normalized}`,
+      country: "未知",
+      destinationPort: "待确认",
+      whatsapp: input.from,
+      email: `${normalized || randomUUID()}@whatsapp.local`,
+      status: "潜在",
+      group: "潜在客户",
+      notes: "WhatsApp webhook 自动创建的潜在客户。"
+    });
+    await bindCustomerIdentities(customerId, { whatsapp: input.from });
+  }
+  const conversationId = await ensureConversation({ customerId, quoteId: null, channel: "whatsapp" });
+  const message = await createConversationMessage({
+    conversationId,
+    senderType: "customer",
+    sourceLanguage: "en",
+    sourceText: input.text,
+    translatedLanguage: "zh-CN",
+    translatedText: input.text,
+    direction: "inbound"
+  });
+  if (input.externalMessageId) {
+    await getPool().query(
+      "UPDATE conversation_messages SET external_message_id = $2, delivery_status = 'received' WHERE id = $1",
+      [message.id, input.externalMessageId]
+    );
+  }
+  await getPool().query(
+    `INSERT INTO customer_followups (id, customer_id, quote_id, followup_type, followup_status, content, owner)
+     VALUES ($1,$2,NULL,'客户跟进','跟进中',$3,'WhatsApp')`,
+    [`fu-${randomUUID()}`, customerId, input.text]
+  );
+  return { conversationId, messageId: message.id };
 }
 
 export async function listCustomersFromDb(): Promise<CustomerWithStats[]> {
@@ -1827,8 +2921,9 @@ function mapProductRow(row: Record<string, unknown>, specs: ProductSpec[]): Prod
   };
 }
 
-function productToStorefrontProduct(product: ProductWithStatus, markup?: ProductMarkup): StorefrontProduct {
-  const basePrice = applyMarkupToPrice(product.price, markup);
+function productToStorefrontProduct(product: ProductWithStatus, markup?: ProductMarkup, currency: "CNY" | "USD" = "CNY", exchangeRate = 1): StorefrontProduct {
+  const markedBasePrice = applyMarkupToPrice(product.price, markup);
+  const basePrice = currency === "USD" ? Number((markedBasePrice * exchangeRate).toFixed(4)) : markedBasePrice;
   return {
     id: product.id,
     offerId: product.id,
@@ -1863,7 +2958,7 @@ function productToStorefrontProduct(product: ProductWithStatus, markup?: Product
       options: product.specs.map((spec, index) => ({
         id: spec.id,
         image: spec.image ?? product.image,
-        price: applyMarkupToPrice(spec.price, markup),
+        price: currency === "USD" ? Number((applyMarkupToPrice(spec.price, markup) * exchangeRate).toFixed(4)) : applyMarkupToPrice(spec.price, markup),
         skuColor: spec.label,
         skuBody: product.size,
         skuName: `${product.sku}-${index + 1}`
@@ -1886,6 +2981,161 @@ async function ensureStorefrontSession(sessionId?: string) {
     [id]
   );
   return id;
+}
+
+async function getExchangeRate(from: "CNY" | "USD", to: "CNY" | "USD") {
+  if (from === to) return 1;
+  const result = await getPool().query<{ rate: string }>(
+    `SELECT rate FROM exchange_rates
+     WHERE currency_from = $1 AND currency_to = $2 AND status = 'active'
+     ORDER BY effective_at DESC
+     LIMIT 1`,
+    [from, to]
+  );
+  if (result.rows[0]) return Number(result.rows[0].rate);
+  if (from === "CNY" && to === "USD") return 1 / 7.24;
+  return 7.24;
+}
+
+async function getCustomerIdByQuoteId(quoteId: string) {
+  const result = await getPool().query<{ customer_id: string }>("SELECT customer_id FROM quotes WHERE id = $1", [quoteId]);
+  return result.rows[0]?.customer_id ?? null;
+}
+
+async function bindCustomerIdentities(customerId: string, input: { sessionId?: string; email?: string; whatsapp?: string }) {
+  const rows = [
+    input.sessionId ? ["session", input.sessionId] : null,
+    input.email ? ["email", input.email] : null,
+    input.whatsapp ? ["whatsapp", input.whatsapp] : null
+  ].filter((row): row is string[] => Boolean(row?.[1]));
+  for (const [type, value] of rows) {
+    await getPool().query(
+      `INSERT INTO customer_identities (id, customer_id, identity_type, identity_value, verified_at, last_seen_at)
+       VALUES ($1,$2,$3,$4,CASE WHEN $3 IN ('email','whatsapp') THEN now() ELSE NULL END,now())
+       ON CONFLICT (identity_type, identity_value) DO UPDATE SET customer_id = EXCLUDED.customer_id, last_seen_at = now()`,
+      [`ci-${randomUUID()}`, customerId, type, value]
+    );
+  }
+}
+
+async function ensureConversation(input: {
+  customerId: string;
+  quoteId?: string | null;
+  channel: "whatsapp" | "site";
+  initialMessage?: string;
+  senderType?: "customer" | "admin" | "system";
+}) {
+  const existing = await getPool().query<{ id: string }>(
+    `SELECT id FROM conversations
+     WHERE customer_id = $1 AND (($2::text IS NULL AND quote_id IS NULL) OR quote_id = $2)
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [input.customerId, input.quoteId ?? null]
+  );
+  const id = existing.rows[0]?.id ?? `conv-${randomUUID()}`;
+  if (!existing.rows[0]) {
+    await getPool().query(
+      `INSERT INTO conversations (id, customer_id, quote_id, channel, status, last_message_at)
+       VALUES ($1,$2,$3,$4,'open',now())`,
+      [id, input.customerId, input.quoteId ?? null, input.channel]
+    );
+  }
+  if (input.initialMessage) {
+    const senderType = input.senderType ?? "system";
+    await getPool().query(
+      `INSERT INTO conversation_messages (
+        id, conversation_id, sender_type, sender_id, source_language, source_text,
+        translated_language, translated_text, direction
+       ) VALUES ($1,$2,$3,NULL,$4,$5,'zh-CN',$6,$7)`,
+      [
+        `msg-${randomUUID()}`,
+        id,
+        senderType,
+        senderType === "customer" ? "en" : "zh-CN",
+        input.initialMessage,
+        input.initialMessage,
+        senderType === "customer" ? "inbound" : "system"
+      ]
+    );
+    await getPool().query("UPDATE conversations SET last_message_at = now() WHERE id = $1", [id]);
+  }
+  return id;
+}
+
+async function createEmailSendRecord(quoteId: string, documentId: string, recipient: string, subject: string) {
+  await getPool().query(
+    `INSERT INTO email_send_records (id, quote_id, document_id, recipient, subject, status, error)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [
+      `email-${randomUUID()}`,
+      quoteId,
+      documentId,
+      recipient,
+      subject,
+      process.env.SMTP_HOST ? "pending" : "pending",
+      process.env.SMTP_HOST ? null : "SMTP is not configured; receipt generated for manual sending."
+    ]
+  );
+}
+
+function hashToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function renderQuoteDocumentHtml(quote: QuoteWithItems, type: QuoteDocumentType, version: number) {
+  const title = type === "inquiry_receipt" ? "Inquiry Receipt" : type === "deal_receipt" ? "Deal Receipt" : "Quotation";
+  const rows = quote.items.map((item) => `
+    <tr>
+      <td>${escapeHtml(item.name)}</td>
+      <td>${escapeHtml(item.sku)}</td>
+      <td>${item.quantity}</td>
+      <td>${quote.currency} ${item.unitPrice.toFixed(2)}</td>
+      <td>${quote.currency} ${item.amount.toFixed(2)}</td>
+    </tr>
+  `).join("");
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(title)} ${escapeHtml(quote.quoteNo)}</title>
+  <style>
+    body{font-family:Arial,sans-serif;color:#111827;margin:40px}
+    h1{color:#ef0018;margin-bottom:4px}
+    .muted{color:#66758d}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:24px 0}
+    .box{border:1px solid #e5e7eb;border-radius:8px;padding:14px}
+    table{width:100%;border-collapse:collapse;margin-top:20px}
+    th,td{border:1px solid #e5e7eb;padding:10px;text-align:left}
+    th{background:#f8fafc}
+    .total{margin-top:20px;text-align:right;font-size:20px;font-weight:800}
+    .hash{margin-top:28px;font-size:12px;color:#66758d}
+  </style>
+</head>
+<body>
+  <h1>${escapeHtml(title)}</h1>
+  <div class="muted">Quote No: ${escapeHtml(quote.quoteNo)} · Version ${version} · Generated ${new Date().toISOString()}</div>
+  <div class="grid">
+    <div class="box"><strong>Customer</strong><br/>${escapeHtml(quote.company)}<br/>${escapeHtml(quote.contactName)}<br/>${escapeHtml(quote.email)}<br/>${escapeHtml(quote.whatsapp)}</div>
+    <div class="box"><strong>Delivery Info</strong><br/>${escapeHtml(quote.country)} / ${escapeHtml(quote.destinationPort)}${quote.containerType === "Product Inquiry" ? "<br/>Product inquiry only" : `<br/>Container: ${escapeHtml(quote.containerType)}<br/>Volume: ${quote.loadedVolumeM3} m3<br/>Weight: ${quote.currentWeightKg} kg`}</div>
+  </div>
+  <table>
+    <thead><tr><th>Product</th><th>SKU</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  <div class="total">Grand Total: ${quote.currency} ${quote.totalAmount.toFixed(2)}</div>
+  <p class="muted">Please keep this document as your inquiry/quotation evidence. The online access link may expire, but this quote number remains valid for lookup.</p>
+</body>
+</html>`;
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;"
+  }[char] ?? char));
 }
 
 function mapMarkupRuleRow(row: Record<string, unknown>): MarkupRule {
@@ -1990,6 +3240,7 @@ function mapQuoteRow(row: Record<string, unknown>, items: QuoteLineItem[]): Quot
   return {
     id: String(row.id),
     quoteNo: String(row.quoteNo),
+    customerId: row.customerId ? String(row.customerId) : null,
     customerName: String(row.customerName),
     contactName: String(row.contactName),
     company: String(row.company),
@@ -2008,12 +3259,15 @@ function mapQuoteRow(row: Record<string, unknown>, items: QuoteLineItem[]): Quot
     customsFee,
     insuranceFee,
     totalAmount,
+    currency: (row.currency ? String(row.currency) : "USD") as "CNY" | "USD",
+    exchangeRate: Number(row.exchangeRate ?? 7.24),
     loadedVolumeM3: Number(row.loadedVolumeM3),
     maxVolumeM3: Number(row.maxVolumeM3),
     currentWeightKg: Number(row.currentWeightKg),
     maxWeightKg: Number(row.maxWeightKg),
     status: row.status as Quote["status"],
     createdAt: row.createdAt ? formatDbDateTime(String(row.createdAt)) : "",
+    accessUrl: null,
     items
   };
 }
@@ -2028,6 +3282,9 @@ function mapQuoteItemRow(row: Record<string, unknown>): QuoteLineItem {
     sku: String(row.sku),
     quantity,
     unitPrice,
+    sourceUnitPriceCny: row.sourceUnitPriceCny === null || row.sourceUnitPriceCny === undefined ? null : Number(row.sourceUnitPriceCny),
+    currency: (row.currency ? String(row.currency) : "USD") as "CNY" | "USD",
+    markupPercent: Number(row.markupPercent ?? 0),
     amount: unitPrice * quantity,
     image: row.image ? String(row.image) : null
   };
@@ -2054,6 +3311,66 @@ function mapFollowupRow(row: Record<string, unknown>): FollowupRecord {
   };
 }
 
+function mapQuoteDocumentRow(row: Record<string, unknown>): QuoteDocument {
+  return {
+    id: String(row.id),
+    quoteId: String(row.quoteId),
+    type: row.type as QuoteDocumentType,
+    version: Number(row.version),
+    title: String(row.title),
+    filePath: String(row.filePath),
+    fileHash: String(row.fileHash),
+    generatedBy: String(row.generatedBy),
+    createdAt: formatDbDateTime(String(row.createdAt))
+  };
+}
+
+function mapQuoteSendRecordRow(row: Record<string, unknown>): QuoteSendRecord {
+  return {
+    id: String(row.id),
+    quoteId: String(row.quoteId),
+    documentId: row.documentId ? String(row.documentId) : null,
+    channel: row.channel as "whatsapp" | "email",
+    recipient: String(row.recipient),
+    status: row.status as "pending" | "sent" | "failed",
+    accessUrl: row.accessUrl ? String(row.accessUrl) : null,
+    externalId: row.externalId ? String(row.externalId) : null,
+    error: row.error ? String(row.error) : null,
+    createdAt: formatDbDateTime(String(row.createdAt))
+  };
+}
+
+function mapConversationRow(row: Record<string, unknown>, messages: ConversationMessage[]): Conversation {
+  return {
+    id: String(row.id),
+    customerId: String(row.customerId),
+    quoteId: row.quoteId ? String(row.quoteId) : null,
+    assignedUserId: row.assignedUserId ? String(row.assignedUserId) : null,
+    channel: row.channel as "whatsapp" | "site",
+    status: row.status as "open" | "closed",
+    lastMessageAt: row.lastMessageAt ? formatDbDateTime(String(row.lastMessageAt)) : null,
+    messages
+  };
+}
+
+function mapConversationMessageRow(row: Record<string, unknown>): ConversationMessage {
+  return {
+    id: String(row.id),
+    conversationId: String(row.conversationId),
+    senderType: row.senderType as "customer" | "admin" | "system",
+    senderId: row.senderId ? String(row.senderId) : null,
+    sourceLanguage: String(row.sourceLanguage),
+    sourceText: String(row.sourceText),
+    translatedLanguage: String(row.translatedLanguage),
+    translatedText: String(row.translatedText),
+    direction: row.direction as "inbound" | "outbound" | "system",
+    externalMessageId: row.externalMessageId ? String(row.externalMessageId) : null,
+    deliveryStatus: row.deliveryStatus ? String(row.deliveryStatus) : null,
+    deliveryError: row.deliveryError ? String(row.deliveryError) : null,
+    createdAt: formatDbDateTime(String(row.createdAt))
+  };
+}
+
 async function saveQuoteRecord(id: string, quoteNo: string, input: QuoteInput | QuoteWithItems) {
   const items = input.items ?? [];
   const productAmount = input.productAmount ?? items.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
@@ -2065,8 +3382,9 @@ async function saveQuoteRecord(id: string, quoteNo: string, input: QuoteInput | 
       `INSERT INTO quotes (
         id, quote_no, customer_name, contact_name, company, country, port, whatsapp, email,
         container_type, product_amount, shipping_fee, local_fee, document_fee, customs_fee,
-        insurance_fee, loaded_volume_m3, max_volume_m3, current_weight_kg, max_weight_kg, status, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,COALESCE($22::timestamptz, now()),now())
+        insurance_fee, loaded_volume_m3, max_volume_m3, current_weight_kg, max_weight_kg,
+        currency, exchange_rate, status, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,COALESCE($24::timestamptz, now()),now())
       ON CONFLICT (id) DO UPDATE SET
         quote_no = EXCLUDED.quote_no,
         customer_name = EXCLUDED.customer_name,
@@ -2087,6 +3405,8 @@ async function saveQuoteRecord(id: string, quoteNo: string, input: QuoteInput | 
         max_volume_m3 = EXCLUDED.max_volume_m3,
         current_weight_kg = EXCLUDED.current_weight_kg,
         max_weight_kg = EXCLUDED.max_weight_kg,
+        currency = EXCLUDED.currency,
+        exchange_rate = EXCLUDED.exchange_rate,
         status = EXCLUDED.status,
         updated_at = now()`,
       [
@@ -2110,6 +3430,8 @@ async function saveQuoteRecord(id: string, quoteNo: string, input: QuoteInput | 
         input.maxVolumeM3 ?? 67.63,
         totalWeight,
         input.maxWeightKg ?? 26800,
+        input.currency ?? "USD",
+        input.exchangeRate ?? 7.24,
         input.status ?? "新询价",
         normalizeDbTimestamp(input.createdAt)
       ]
@@ -2129,9 +3451,24 @@ async function saveQuoteRecord(id: string, quoteNo: string, input: QuoteInput | 
     await client.query("DELETE FROM quote_items WHERE quote_id = $1", [id]);
     for (const item of items) {
       await client.query(
-        `INSERT INTO quote_items (id, quote_id, product_id, name, sku, quantity, unit_price, image)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [item.id || `qi-${randomUUID()}`, id, item.productId ?? null, item.name, item.sku, item.quantity, item.unitPrice, item.image ?? null]
+        `INSERT INTO quote_items (
+          id, quote_id, product_id, name, sku, quantity, unit_price,
+          source_unit_price_cny, currency, markup_percent, image
+         )
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [
+          item.id || `qi-${randomUUID()}`,
+          id,
+          item.productId ?? null,
+          item.name,
+          item.sku,
+          item.quantity,
+          item.unitPrice,
+          item.sourceUnitPriceCny ?? null,
+          item.currency ?? input.currency ?? "USD",
+          item.markupPercent ?? 0,
+          item.image ?? null
+        ]
       );
     }
     await client.query("COMMIT");
@@ -2489,6 +3826,25 @@ async function seedProductMarkups() {
   }
 }
 
+async function seedProductCategories() {
+  await getPool().query(`
+    INSERT INTO product_categories (product_id, category_id, is_primary)
+    SELECT id, category_id, true FROM products
+    ON CONFLICT (product_id, category_id) DO UPDATE SET is_primary = true
+  `);
+}
+
+async function seedExchangeRates() {
+  await getPool().query(
+    `INSERT INTO exchange_rates (id, currency_from, currency_to, rate, source, status, effective_at)
+     VALUES
+      ('rate-cny-usd-default', 'CNY', 'USD', $1, 'manual', 'active', now()),
+      ('rate-usd-cny-default', 'USD', 'CNY', $2, 'manual', 'active', now())
+     ON CONFLICT (id) DO UPDATE SET rate = EXCLUDED.rate, status = 'active', effective_at = now()`,
+    [1 / 7.24, 7.24]
+  );
+}
+
 async function seedSuppliers() {
   const existing = await getPool().query<{ count: string }>("SELECT COUNT(*) AS count FROM suppliers");
   if (Number(existing.rows[0].count) > 0) return;
@@ -2621,6 +3977,8 @@ async function seedQuotes() {
       quoteNo: "QT-20260524-001",
       contactName: initialQuotes[0].customerName,
       destinationPort: initialQuotes[0].port,
+      currency: "USD" as const,
+      exchangeRate: 7.24,
       localFee: 280,
       documentFee: 80,
       customsFee: 120,
@@ -2654,6 +4012,8 @@ async function seedQuotes() {
       whatsapp: "+1 310 555 0188",
       email: `${String(contactName).split(" ")[0].toLowerCase()}@example.com`,
       containerType: String(containerType),
+      currency: "USD" as const,
+      exchangeRate: 7.24,
       productCount: Number(productCount),
       totalProducts: Number(productCount) * 1000,
       productAmount: Number(productAmount),

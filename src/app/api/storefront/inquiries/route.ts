@@ -7,6 +7,6 @@ export async function POST(request: Request) {
   if (!input.customerName || !input.whatsapp || !input.items?.length) {
     return NextResponse.json({ message: "缺少姓名、WhatsApp 或询盘商品" }, { status: 400 });
   }
-  const quote = await createStorefrontInquiry(input);
-  return NextResponse.json({ quote }, { status: 201 });
+  const result = await createStorefrontInquiry(input);
+  return NextResponse.json(result, { status: 201 });
 }

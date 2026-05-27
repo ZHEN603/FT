@@ -13,8 +13,10 @@ import {
   Edit3,
   Eye,
   FileText,
+  GripVertical,
   MoreHorizontal,
   Package,
+  MessageCircle,
   Plus,
   RefreshCw,
   Search,
@@ -29,7 +31,7 @@ import {
   X
 } from "lucide-react";
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AdminSidebar, usd } from "@/components/shared";
 import { categories as fallbackCategories, initialQuotes } from "@/lib/mock-data";
 import type { Category, Product, Quote } from "@/lib/types";
@@ -49,8 +51,30 @@ type Section =
 type ProductWithStatus = Product & { status: "active" | "inactive"; stock: number };
 type ProductMetrics = { total: number; active: number; inactive: number; lowStock: number; todayNew: number };
 type CategoryStatus = "active" | "inactive";
+type CategoryDropMode = "before" | "inside" | "after";
+type CategorySortKey = "tree" | "level" | "sortOrder" | "productCount";
+type SortDirection = "asc" | "desc";
 type MarkupStatus = "configured" | "applied" | "unset";
 type MarkupRuleStatus = "active" | "inactive";
+type ProductMarkup = {
+  id: string;
+  productId: string;
+  sku: string;
+  name: string;
+  nameEn: string;
+  image: string;
+  categoryId: string;
+  categoryName: string;
+  originalPrice: number;
+  markupPercent: number;
+  finalPrice: number;
+  status: MarkupStatus;
+  ruleId: string | null;
+  ruleName: string | null;
+  appliedAt: string | null;
+};
+type ServerPagination = { total: number; page: number; pageSize: number; totalPages: number };
+type ProductMarkupFormState = { productId: string; ruleId: string; markupPercent: string };
 type MarkupRuleType = "percentage" | "fixed";
 type CategoryWithMeta = Category & {
   parentId: string | null;
@@ -89,23 +113,6 @@ type MarkupRule = {
   createdAt: string;
   categoryName?: string | null;
 };
-type ProductMarkup = {
-  id: string;
-  productId: string;
-  sku: string;
-  name: string;
-  nameEn: string;
-  image: string;
-  categoryId: string;
-  categoryName: string;
-  originalPrice: number;
-  markupPercent: number;
-  finalPrice: number;
-  status: MarkupStatus;
-  ruleId: string | null;
-  ruleName: string | null;
-  appliedAt: string | null;
-};
 type MarkupMetrics = { total: number; configured: number; applied: number; unset: number };
 type MarkupRuleFormState = {
   id?: string;
@@ -118,12 +125,6 @@ type MarkupRuleFormState = {
   priority: string;
   description: string;
 };
-type ProductMarkupFormState = {
-  productId: string;
-  ruleId: string;
-  markupPercent: string;
-  status: MarkupStatus;
-};
 type QuoteLineItem = {
   id: string;
   productId: string | null;
@@ -131,8 +132,36 @@ type QuoteLineItem = {
   sku: string;
   quantity: number;
   unitPrice: number;
+  sourceUnitPriceCny?: number | null;
+  currency?: "CNY" | "USD";
+  markupPercent?: number;
   amount: number;
   image?: string | null;
+};
+type AdminConversationMessage = {
+  id: string;
+  conversationId: string;
+  senderType: "customer" | "admin" | "system";
+  sourceText: string;
+  translatedText: string;
+  direction: "inbound" | "outbound" | "system";
+  deliveryStatus?: string | null;
+  deliveryError?: string | null;
+  createdAt: string;
+};
+type AdminConversation = {
+  id: string;
+  customerId: string;
+  quoteId: string | null;
+  channel: "whatsapp" | "site";
+  status: "open" | "closed";
+  lastMessageAt: string | null;
+  customerName: string;
+  company: string;
+  whatsapp: string;
+  email: string;
+  quoteNo: string | null;
+  messages: AdminConversationMessage[];
 };
 type QuoteWithItems = Quote & {
   quoteNo: string;
@@ -172,6 +201,19 @@ type QuoteFormState = {
   currentWeightKg: string;
   maxWeightKg: string;
   createdAt: string;
+  items: QuoteLineItem[];
+};
+type AdminNotification = {
+  id: string;
+  type: "new_inquiry" | "customer_message" | "quote_sent" | "deal_won";
+  title: string;
+  body: string;
+  quoteId: string | null;
+  quoteNo: string | null;
+  customerName: string;
+  whatsapp: string;
+  createdAt: string;
+  unread: boolean;
 };
 type CustomerStatus = "活跃" | "跟进中" | "潜在" | "失效";
 type CustomerGroup = "重要客户" | "普通客户" | "潜在客户";
@@ -333,11 +375,27 @@ type ProductFormState = {
   sourceUrl: string;
   status: "active" | "inactive";
   stock: string;
+  images: string[];
 };
+
+const CATEGORY_ICON_OPTIONS = [
+  { id: "hanger", label: "衣架", glyph: "⎇" },
+  { id: "shirt", label: "服装", glyph: "♙" },
+  { id: "sparkles", label: "精品", glyph: "✦" },
+  { id: "layers", label: "层级", glyph: "▧" },
+  { id: "grip", label: "裤夹", glyph: "▥" },
+  { id: "boxes", label: "箱包", glyph: "□" },
+  { id: "wood", label: "木质", glyph: "木" },
+  { id: "metal", label: "金属", glyph: "金" },
+  { id: "plastic", label: "塑料", glyph: "塑" },
+  { id: "custom", label: "定制", glyph: "定" }
+];
 
 export default function AdminPage() {
   const [dashboardQuotes] = useState<Quote[]>(initialQuotes);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const [conversationModalOpen, setConversationModalOpen] = useState(false);
+  const [conversationTarget, setConversationTarget] = useState<{ whatsapp?: string; quoteId?: string } | null>(null);
   const [section, setSection] = useState<Section>(() => {
     if (typeof window === "undefined") return "dashboard";
     const requested = new URLSearchParams(window.location.search).get("section") as Section | null;
@@ -382,6 +440,11 @@ export default function AdminPage() {
     window.history.pushState(null, "", nextUrl);
   }
 
+  function openConversations(target?: { whatsapp?: string; quoteId?: string }) {
+    setConversationTarget(target ?? null);
+    setConversationModalOpen(true);
+  }
+
   if (checkingAuth) {
     return (
       <main className="admin-auth-loading">
@@ -394,30 +457,95 @@ export default function AdminPage() {
     <main className="admin-app">
       <AdminSidebar active={section} activeSub={tab} onNavigate={navigate} />
       <section className="admin-content">
-        {section === "dashboard" && <Dashboard quotes={dashboardQuotes} />}
-        {section === "products" && <ProductsAdmin tab={tab} />}
-        {section === "quotes" && <QuotesAdmin />}
-        {section === "customers" && <CustomersAdmin />}
-        {section === "followups" && <FollowupsAdmin />}
-        {section === "suppliers" && <SuppliersAdmin />}
-        {section === "analytics" && <ComingSoon title={tabLabel(tab) || "分析管理"} />}
-        {section === "calculator" && <ComingSoon title="报价换算" />}
-        {section === "exchange" && <ComingSoon title="汇率管理" />}
-        {section === "settings" && <ComingSoon title={tabLabel(tab) || "系统设置"} />}
-        {section === "logs" && <ComingSoon title="操作日志" />}
+        <AdminTopContext.Provider value={{ openConversations, navigate }}>
+          {section === "dashboard" && <Dashboard quotes={dashboardQuotes} />}
+          {section === "products" && <ProductsAdmin tab={tab} />}
+          {section === "quotes" && <QuotesAdmin onOpenConversation={openConversations} />}
+          {section === "customers" && <CustomersAdmin />}
+          {section === "followups" && <FollowupsAdmin />}
+          {section === "suppliers" && <SuppliersAdmin />}
+          {section === "analytics" && <ComingSoon title={tabLabel(tab) || "分析管理"} />}
+          {section === "calculator" && <ComingSoon title="报价换算" />}
+          {section === "exchange" && <ComingSoon title="汇率管理" />}
+          {section === "settings" && <ComingSoon title={tabLabel(tab) || "系统设置"} />}
+          {section === "logs" && <ComingSoon title="操作日志" />}
+        </AdminTopContext.Provider>
       </section>
+      {conversationModalOpen && (
+        <AdminConversationModal
+          target={conversationTarget}
+          onClose={() => setConversationModalOpen(false)}
+        />
+      )}
     </main>
   );
 }
 
+const AdminTopContext = React.createContext<{
+  openConversations: (target?: { whatsapp?: string; quoteId?: string }) => void;
+  navigate: (nextSection: string, nextTab?: string) => void;
+}>({ openConversations: () => undefined, navigate: () => undefined });
+
 function AdminTop({ title, subtitle, children }: { title: string; subtitle: string; children?: React.ReactNode }) {
+  const { openConversations, navigate } = React.useContext(AdminTopContext);
+  const [notifications, setNotifications] = useState<AdminNotification[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [open, setOpen] = useState(false);
+
+  async function loadNotifications() {
+    const response = await fetch("/api/admin/notifications");
+    if (!response.ok) return;
+    const data = await response.json() as { unreadCount: number; items: AdminNotification[] };
+    setNotifications(data.items ?? []);
+    setUnreadCount(data.unreadCount ?? 0);
+  }
+
+  useEffect(() => {
+    const initial = window.setTimeout(() => void loadNotifications(), 0);
+    const timer = window.setInterval(() => void loadNotifications(), 30000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  function openNotification(item: AdminNotification) {
+    if (item.quoteId) {
+      navigate("quotes");
+      openConversations({ whatsapp: item.whatsapp, quoteId: item.quoteId });
+    }
+    setOpen(false);
+  }
+
   return (
     <div className="admin-top">
       <div>
         <h1>{title}</h1>
         <p>{subtitle}</p>
       </div>
-      <div className="admin-top-actions">{children}</div>
+      <div className="admin-top-actions">
+        {children}
+        <div className="admin-notification-wrap">
+          <button className="admin-bell" type="button" aria-label="通知" onClick={() => setOpen((current) => !current)}>
+            <Bell size={20} />
+            {unreadCount > 0 && <span>{unreadCount}</span>}
+          </button>
+          {open && (
+            <div className="admin-notification-panel">
+              <strong>信息栏</strong>
+              {notifications.length === 0 && <p>暂无新通知</p>}
+              {notifications.slice(0, 8).map((item) => (
+                <button type="button" key={item.id} onClick={() => openNotification(item)}>
+                  <em className={item.unread ? "unread" : ""} />
+                  <span><b>{item.title}</b><small>{item.customerName} {item.quoteNo ? `· ${item.quoteNo}` : ""}</small></span>
+                  <i>{item.createdAt}</i>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <button className="admin-bell admin-message-icon" type="button" onClick={() => openConversations()} aria-label="会话中心"><MessageCircle size={20} /></button>
+      </div>
     </div>
   );
 }
@@ -455,6 +583,41 @@ function usePagination<T>(items: T[], resetKey: string, initialPageSize = 10) {
   };
 }
 
+function useAutoDismissMessage(duration = 3000) {
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    if (!message) return;
+    const timer = window.setTimeout(() => setMessage(""), duration);
+    return () => window.clearTimeout(timer);
+  }, [duration, message, setMessage]);
+
+  return [message, setMessage] as const;
+}
+
+function AdminModalBackdrop({ children }: { children: React.ReactNode }) {
+  useEffect(() => {
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousHtmlOverflow;
+    };
+  }, []);
+
+  return <div className="admin-modal-backdrop">{children}</div>;
+}
+
+async function readJsonSafe<T>(response: Response, fallback: T): Promise<T> {
+  try {
+    return await response.json() as T;
+  } catch {
+    return fallback;
+  }
+}
+
 function PaginationFooter({
   total,
   page,
@@ -473,7 +636,7 @@ function PaginationFooter({
   const pages = paginationRange(page, totalPages);
   return (
     <div className="table-foot">
-      <span>共 {total.toLocaleString()} 条</span>
+      <span>共 {total.toLocaleString()} 条 · 第 {page} / {totalPages} 页</span>
       <div>
         <button disabled={page <= 1} onClick={() => onPageChange(page - 1)}>&lt;</button>
         {pages.map((item, index) => (
@@ -627,7 +790,7 @@ function ProductListAdmin() {
   const [editing, setEditing] = useState<ProductWithStatus | null>(null);
   const [showEditor, setShowEditor] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useAutoDismissMessage();
   const selected = rows.find((product) => product.id === selectedId) ?? rows[0] ?? null;
   const visibleRows = rows.filter((product) => {
     const keyword = query.trim().toLowerCase();
@@ -696,7 +859,13 @@ function ProductListAdmin() {
       sourceUrl: form.sourceUrl,
       status: form.status,
       stock: Number(form.stock),
-      specs: [{ id: "s1", label: "默认规格", price: Number(form.price), stock: Number(form.stock), image: form.image }]
+      specs: normalizeImageList(form.images, form.image).map((image, index) => ({
+        id: `s${index + 1}`,
+        label: index === 0 ? "默认规格" : `图片 ${index + 1}`,
+        price: Number(form.price),
+        stock: index === 0 ? Number(form.stock) : 0,
+        image
+      }))
     };
     const response = await fetch("/api/admin/products", {
       method: form.id ? "PUT" : "POST",
@@ -777,36 +946,38 @@ function ProductListAdmin() {
             <button onClick={() => void loadProducts()}><RefreshCw size={16} /> 刷新</button>
             <button onClick={resetFilters}>重置</button>
           </div>
-          <table className="admin-table">
-            <thead><tr><th><input type="checkbox" /></th><th>产品信息</th><th>SKU</th><th>分类</th><th>价格 (CNY)</th><th>库存</th><th>状态</th><th>操作</th></tr></thead>
-            <tbody>
-              {loading && <tr><td colSpan={8}>正在从数据库加载产品...</td></tr>}
-              {!loading && visibleRows.length === 0 && <tr><td colSpan={8}>暂无产品数据。</td></tr>}
-              {pagination.pageItems.map((product) => (
-                <tr key={product.id} className={selected?.id === product.id ? "selected" : ""} onClick={() => setSelectedId(product.id)}>
-                  <td><input type="checkbox" /></td>
-                  <td className="product-cell"><img src={product.image} alt="" /><strong>{product.name}</strong><span>{product.size}</span></td>
-                  <td>{product.sku}</td>
-                  <td>{dbCategories.find((entry) => entry.id === product.categoryId)?.name}</td>
-                  <td><strong>¥ {(product.price * 31).toFixed(2)}</strong><span>MOQ: {product.moq}</span></td>
-                  <td><strong>{product.stock.toLocaleString()}</strong><em>{product.stock < 1000 ? "预警" : "充足"}</em></td>
-                  <td>
-                    <button
-                      className={product.status === "active" ? "toggle on" : "toggle"}
-                      aria-label={product.status === "active" ? "点击下架" : "点击上架"}
-                      onClick={(event) => { event.stopPropagation(); void toggleStatus(product); }}
-                    />
-                  </td>
-                  <td className="row-actions">
-                    <button onClick={(event) => { event.stopPropagation(); openEdit(product); }}><Edit3 size={16} /></button>
-                    <button onClick={(event) => { event.stopPropagation(); setSelectedId(product.id); }}><Eye size={16} /></button>
-                    <button onClick={(event) => { event.stopPropagation(); void toggleStatus(product); }}><MoreHorizontal size={16} /></button>
-                    <button className="danger-action" onClick={(event) => { event.stopPropagation(); void removeProduct(product); }}><Trash2 size={16} /></button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="admin-table-scroll">
+            <table className="admin-table">
+              <thead><tr><th><input type="checkbox" /></th><th>产品信息</th><th>SKU</th><th>分类</th><th>价格 (CNY)</th><th>库存</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody>
+                {loading && <tr><td colSpan={8}>正在从数据库加载产品...</td></tr>}
+                {!loading && visibleRows.length === 0 && <tr><td colSpan={8}>暂无产品数据。</td></tr>}
+                {pagination.pageItems.map((product) => (
+                  <tr key={product.id} className={selected?.id === product.id ? "selected" : ""} onClick={() => setSelectedId(product.id)}>
+                    <td><input type="checkbox" /></td>
+                    <td className="product-cell"><img src={product.image} alt="" /><strong>{product.name}</strong><span>{product.size}</span></td>
+                    <td>{product.sku}</td>
+                    <td>{dbCategories.find((entry) => entry.id === product.categoryId)?.name}</td>
+                    <td><strong>¥ {(product.price * 31).toFixed(2)}</strong><span>MOQ: {product.moq}</span></td>
+                    <td><strong>{product.stock.toLocaleString()}</strong><em>{product.stock < 1000 ? "预警" : "充足"}</em></td>
+                    <td>
+                      <button
+                        className={product.status === "active" ? "toggle on" : "toggle"}
+                        aria-label={product.status === "active" ? "点击下架" : "点击上架"}
+                        onClick={(event) => { event.stopPropagation(); void toggleStatus(product); }}
+                      />
+                    </td>
+                    <td className="row-actions">
+                      <button onClick={(event) => { event.stopPropagation(); openEdit(product); }}><Edit3 size={16} /></button>
+                      <button onClick={(event) => { event.stopPropagation(); setSelectedId(product.id); }}><Eye size={16} /></button>
+                      <button onClick={(event) => { event.stopPropagation(); void toggleStatus(product); }}><MoreHorizontal size={16} /></button>
+                      <button className="danger-action" onClick={(event) => { event.stopPropagation(); void removeProduct(product); }}><Trash2 size={16} /></button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           <PaginationFooter
             total={visibleRows.length}
             page={pagination.page}
@@ -831,136 +1002,196 @@ function ProductListAdmin() {
   );
 }
 
+function AdminConversationModal({
+  target,
+  onClose
+}: {
+  target: { whatsapp?: string; quoteId?: string } | null;
+  onClose: () => void;
+}) {
+  const [conversations, setConversations] = useState<AdminConversation[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(true);
+  const active = conversations.find((item) => item.id === activeId) ?? conversations[0] ?? null;
+  const targetQuoteId = target?.quoteId ?? "";
+  const targetWhatsapp = target?.whatsapp ?? "";
+
+  async function loadConversations(nextTarget: { quoteId?: string; whatsapp?: string } = {}) {
+    setLoading(true);
+    const response = await fetch("/api/admin/conversations");
+    const data = await response.json() as { conversations: AdminConversation[] };
+    setConversations(data.conversations ?? []);
+    const matched = data.conversations?.find((item) => (
+      (nextTarget.quoteId && item.quoteId === nextTarget.quoteId) ||
+      (nextTarget.whatsapp && item.whatsapp === nextTarget.whatsapp)
+    ));
+    setActiveId((current) => matched?.id ?? current ?? data.conversations?.[0]?.id ?? null);
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadConversations({ quoteId: targetQuoteId, whatsapp: targetWhatsapp });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [targetQuoteId, targetWhatsapp]);
+
+  async function sendMessage() {
+    if (!active || !message.trim()) return;
+    const text = message.trim();
+    setMessage("");
+    const response = await fetch(`/api/admin/conversations/${encodeURIComponent(active.id)}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text, senderId: "admin-001" })
+    });
+    if (response.ok) await loadConversations({ quoteId: targetQuoteId, whatsapp: targetWhatsapp });
+  }
+
+  function whatsappUrl() {
+    const phone = active?.whatsapp.replace(/[^\d]/g, "") ?? "";
+    const text = encodeURIComponent(`您好，我是报价团队，想和您确认${active?.quoteNo ? `报价单 ${active.quoteNo}` : "询盘"}。`);
+    return phone ? `https://wa.me/${phone}?text=${text}` : "https://wa.me/";
+  }
+
+  return (
+    <AdminModalBackdrop>
+      <section className="admin-whatsapp-modal">
+        <aside className="admin-whatsapp-list">
+          <div className="admin-whatsapp-head">
+            <strong>会话中心</strong>
+            <button type="button" onClick={onClose}><X size={18} /></button>
+          </div>
+          <div className="admin-whatsapp-search"><Search size={16} /><input placeholder="搜索客户 / WhatsApp" /></div>
+          <div className="admin-whatsapp-items">
+            {loading && <p>正在加载会话...</p>}
+            {!loading && !conversations.length && <p>暂无会话</p>}
+            {conversations.map((conversation) => (
+              <button
+                type="button"
+                className={conversation.id === active?.id ? "active" : ""}
+                key={conversation.id}
+                onClick={() => setActiveId(conversation.id)}
+              >
+                <span>{conversation.customerName.slice(0, 1) || "客"}</span>
+                <strong>{conversation.company || conversation.customerName}<em>{conversation.lastMessageAt ?? ""}</em></strong>
+                <small>{conversation.messages.at(-1)?.translatedText ?? conversation.whatsapp}</small>
+              </button>
+            ))}
+          </div>
+        </aside>
+        <main className="admin-whatsapp-chat">
+          {active ? (
+            <>
+              <header>
+                <div><strong>{active.company || active.customerName}</strong><span>{active.whatsapp} {active.quoteNo ? ` · ${active.quoteNo}` : ""}</span></div>
+                <a href={whatsappUrl()} target="_blank" rel="noreferrer">打开 WhatsApp</a>
+              </header>
+              <div className="admin-whatsapp-messages">
+                {active.messages.map((item) => (
+                  <div className={`wa-message ${item.direction}`} key={item.id}>
+                    <p>{item.translatedText}</p>
+                    {item.sourceText !== item.translatedText && <small>原文：{item.sourceText}</small>}
+                    {item.deliveryStatus && item.direction === "outbound" && <small>发送状态：{item.deliveryStatus}{item.deliveryError ? ` · ${item.deliveryError}` : ""}</small>}
+                    <em>{item.createdAt}</em>
+                  </div>
+                ))}
+              </div>
+              <footer>
+                <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="输入消息，Phase1 先保存站内记录" onKeyDown={(event) => { if (event.key === "Enter") void sendMessage(); }} />
+                <button type="button" onClick={() => void sendMessage()}><Send size={17} /></button>
+              </footer>
+            </>
+          ) : <div className="admin-whatsapp-empty">请选择会话</div>}
+        </main>
+      </section>
+    </AdminModalBackdrop>
+  );
+}
+
 function SmallMetric({ label, value, icon: Icon, green = false, red = false, purple = false }: { label: string; value: string; icon: React.ElementType; green?: boolean; red?: boolean; purple?: boolean }) {
   return <div className="small-metric"><div><span>{label}</span><strong>{value}</strong></div><Icon className={green ? "green" : red ? "red" : purple ? "purple" : ""} size={34} /></div>;
 }
 
 function MarkupManagementAdmin() {
-  const [products, setProducts] = useState<ProductMarkup[]>([]);
   const [rules, setRules] = useState<MarkupRule[]>([]);
   const [dbCategories, setDbCategories] = useState<Category[]>(fallbackCategories);
   const [metrics, setMetrics] = useState<MarkupMetrics>({ total: 0, configured: 0, applied: 0, unset: 0 });
   const [activeTab, setActiveTab] = useState<"products" | "rules">("products");
+  // products tab
+  const [products, setProducts] = useState<ProductMarkup[]>([]);
+  const [pagination, setPagination] = useState<ServerPagination>({ total: 0, page: 1, pageSize: 20, totalPages: 1 });
+  const [loadingProducts, setLoadingProducts] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState("all");
-  const [openMarkupCategories, setOpenMarkupCategories] = useState<Set<string>>(() => new Set(["wood", "plastic"]));
+  const [openCategories, setOpenCategories] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [ruleFilter, setRuleFilter] = useState("all");
-  const [query, setQuery] = useState("");
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [editingProduct, setEditingProduct] = useState<ProductMarkup | null>(null);
+  // rules tab
   const [editingRule, setEditingRule] = useState<MarkupRule | null>(null);
   const [showRuleEditor, setShowRuleEditor] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useAutoDismissMessage();
 
   const categoryTree = useMemo(() => {
-    const counts = new Map<string, number>();
-    products.forEach((product) => counts.set(product.categoryId, (counts.get(product.categoryId) ?? 0) + 1));
-    const categories = dbCategories as CategoryWithMeta[];
-    const childrenByParent = new Map<string | null, CategoryWithMeta[]>();
-    categories.forEach((category) => {
-      const parentId = category.parentId ?? null;
-      childrenByParent.set(parentId, [...(childrenByParent.get(parentId) ?? []), category]);
+    const cats = dbCategories as CategoryWithMeta[];
+    const byParent = new Map<string | null, CategoryWithMeta[]>();
+    cats.forEach((c) => {
+      const key = c.parentId ?? null;
+      byParent.set(key, [...(byParent.get(key) ?? []), c]);
     });
-    childrenByParent.forEach((items) => items.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name)));
-    const countWithChildren = (category: CategoryWithMeta): number => {
-      const ownCount = counts.get(category.id) ?? 0;
-      return ownCount + (childrenByParent.get(category.id) ?? []).reduce((sum, child) => sum + countWithChildren(child), 0);
-    };
-    return {
-      roots: childrenByParent.get(null) ?? [],
-      childrenByParent,
-      countById: new Map(categories.map((category) => [category.id, countWithChildren(category)]))
-    };
-  }, [dbCategories, products]);
-  const selectedCategoryIds = useMemo(() => {
-    if (selectedCategory === "all") return null;
-    const ids = new Set<string>();
-    const visit = (id: string) => {
-      ids.add(id);
-      (categoryTree.childrenByParent.get(id) ?? []).forEach((child) => visit(child.id));
-    };
-    visit(selectedCategory);
-    return ids;
-  }, [categoryTree, selectedCategory]);
-  const visibleProducts = products.filter((product) => {
-    const keyword = query.trim().toLowerCase();
-    const matchQuery = !keyword || `${product.name} ${product.nameEn} ${product.sku}`.toLowerCase().includes(keyword);
-    const matchCategory = !selectedCategoryIds || selectedCategoryIds.has(product.categoryId);
-    const matchStatus = statusFilter === "all" || product.status === statusFilter;
-    const matchRule = ruleFilter === "all" || product.ruleId === ruleFilter || (ruleFilter === "none" && !product.ruleId);
-    return matchQuery && matchCategory && matchStatus && matchRule;
-  });
-  const filteredMetrics = {
-    total: visibleProducts.length,
-    configured: visibleProducts.filter((product) => product.status !== "unset").length,
-    applied: visibleProducts.filter((product) => product.status === "applied").length,
-    unset: visibleProducts.filter((product) => product.status === "unset").length
-  };
-  const pagination = usePagination(visibleProducts, `${query}|${selectedCategory}|${statusFilter}|${ruleFilter}|${activeTab}`);
+    byParent.forEach((items) => items.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name)));
+    const countById = new Map(cats.map((c) => [c.id, c.productCount ?? 0]));
+    return { roots: byParent.get(null) ?? [], byParent, countById };
+  }, [dbCategories]);
 
-  async function loadMarkups() {
-    setLoading(true);
-    await fetch("/api/admin/markups")
-      .then((response) => response.json())
-      .then((data: { products: ProductMarkup[]; rules: MarkupRule[]; categories: CategoryWithMeta[]; metrics: MarkupMetrics }) => {
-        setProducts(data.products);
-        setRules(data.rules);
-        setDbCategories(data.categories);
-        setMetrics(data.metrics);
-      })
-      .finally(() => setLoading(false));
+  const fetchProducts = useCallback(async (page: number, pageSize: number) => {
+    setLoadingProducts(true);
+    const params = new URLSearchParams({
+      page: String(page), pageSize: String(pageSize),
+      query, category: selectedCategory, status: statusFilter, rule: ruleFilter
+    });
+    const response = await fetch(`/api/admin/markups?${params}`);
+    if (!response.ok) { setLoadingProducts(false); return; }
+    const data = await response.json() as {
+      products: ProductMarkup[];
+      rules: MarkupRule[];
+      categories: CategoryWithMeta[];
+      metrics: MarkupMetrics;
+      pagination: ServerPagination;
+    };
+    setProducts(data.products ?? []);
+    setRules(data.rules ?? []);
+    setDbCategories(data.categories ?? []);
+    setMetrics(data.metrics ?? { total: 0, configured: 0, applied: 0, unset: 0 });
+    setPagination(data.pagination ?? { total: 0, page: 1, pageSize: 20, totalPages: 1 });
+    setOpenCategories((prev) => {
+      const parentIds = new Set((data.categories ?? []).map((c) => c.parentId).filter((id): id is string => Boolean(id)));
+      return new Set([...prev, ...parentIds]);
+    });
+    setLoadingProducts(false);
+  }, [query, selectedCategory, statusFilter, ruleFilter]);
+
+  async function loadRules() {
+    const response = await fetch("/api/admin/markups?page=1&pageSize=1");
+    if (!response.ok) return;
+    const data = await response.json() as { rules: MarkupRule[]; categories: CategoryWithMeta[]; metrics: MarkupMetrics };
+    setRules(data.rules ?? []);
+    setDbCategories(data.categories ?? []);
+    setMetrics(data.metrics ?? { total: 0, configured: 0, applied: 0, unset: 0 });
   }
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void loadMarkups();
+      if (activeTab === "products") void fetchProducts(1, pagination.pageSize);
+      else void loadRules();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, []);
-
-  function resetFilters() {
-    setQuery("");
-    setSelectedCategory("all");
-    setStatusFilter("all");
-    setRuleFilter("all");
-  }
-
-  function toggleMarkupCategory(id: string) {
-    setOpenMarkupCategories((current) => {
-      const next = new Set(current);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }
-
-  function toggleSelect(productId: string) {
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      if (next.has(productId)) {
-        next.delete(productId);
-      } else {
-        next.add(productId);
-      }
-      return next;
-    });
-  }
-
-  function toggleSelectAll() {
-    setSelectedIds((current) => {
-      if (pagination.pageItems.length > 0 && pagination.pageItems.every((product) => current.has(product.productId))) {
-        const next = new Set(current);
-        pagination.pageItems.forEach((product) => next.delete(product.productId));
-        return next;
-      }
-      return new Set([...Array.from(current), ...pagination.pageItems.map((product) => product.productId)]);
-    });
-  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, fetchProducts]);
 
   async function saveProductMarkup(form: ProductMarkupFormState) {
     setSaving(true);
@@ -968,24 +1199,41 @@ function MarkupManagementAdmin() {
     const response = await fetch("/api/admin/markups", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "product",
-        productId: form.productId,
-        ruleId: form.ruleId === "none" ? null : form.ruleId,
-        markupPercent: Number(form.markupPercent),
-        status: form.status
-      })
+      body: JSON.stringify({ action: "product", productId: form.productId, ruleId: form.ruleId === "none" ? null : form.ruleId, markupPercent: Number(form.markupPercent), status: "configured" })
     });
     setSaving(false);
-    if (!response.ok) {
-      const data = await response.json() as { message?: string };
-      setMessage(data.message ?? "保存失败");
-      return false;
-    }
+    if (!response.ok) { setMessage((await readJsonSafe<{ message?: string }>(response, {})).message ?? "保存失败"); return; }
     setEditingProduct(null);
-    setMessage("商品加价已保存");
-    await loadMarkups();
-    return true;
+    setMessage("加价已保存");
+    await fetchProducts(pagination.page, pagination.pageSize);
+  }
+
+  async function applyRuleToProducts(ruleId?: string) {
+    const resolvedId = ruleId ?? rules.find((r) => r.status === "active")?.id;
+    if (!resolvedId) { setMessage("请先创建启用中的加价规则"); return; }
+    const productIds = selectedIds.size > 0 ? Array.from(selectedIds) : undefined;
+    const response = await fetch("/api/admin/markups", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "apply-rule", ruleId: resolvedId, productIds })
+    });
+    const data = await readJsonSafe<{ count?: number; message?: string }>(response, {});
+    if (!response.ok) { setMessage(data.message ?? "应用失败"); return; }
+    setSelectedIds(new Set());
+    setMessage(`已应用到 ${data.count ?? 0} 个商品`);
+    await fetchProducts(pagination.page, pagination.pageSize);
+  }
+
+  async function clearMarkup(productIds?: string[]) {
+    const response = await fetch("/api/admin/markups", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "clear", productIds })
+    });
+    const data = await readJsonSafe<{ count?: number }>(response, {});
+    setSelectedIds(new Set());
+    setMessage(`已清空 ${data.count ?? 0} 个商品的加价`);
+    await fetchProducts(pagination.page, pagination.pageSize);
   }
 
   async function saveRule(form: MarkupRuleFormState) {
@@ -995,112 +1243,61 @@ function MarkupManagementAdmin() {
       method: form.id ? "PUT" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        action: "rule",
-        id: form.id,
-        name: form.name,
-        type: form.type,
-        value: Number(form.value),
-        scope: form.scope,
+        action: "rule", id: form.id, name: form.name, type: form.type,
+        value: Number(form.value), scope: form.scope,
         categoryId: form.scope === "category" ? form.categoryId : null,
-        status: form.status,
-        priority: Number(form.priority),
-        description: form.description
+        status: form.status, priority: Number(form.priority), description: form.description
       })
     });
     setSaving(false);
-    if (!response.ok) {
-      const data = await response.json() as { message?: string };
-      setMessage(data.message ?? "保存失败");
-      return false;
-    }
+    if (!response.ok) { setMessage((await readJsonSafe<{ message?: string }>(response, {})).message ?? "保存失败"); return false; }
     setEditingRule(null);
     setShowRuleEditor(false);
     setMessage("加价规则已保存");
-    await loadMarkups();
+    await loadRules();
     return true;
   }
 
-  async function applyRule(ruleId?: string) {
-    const resolvedRuleId = ruleId ?? rules.find((rule) => rule.status === "active")?.id;
-    if (!resolvedRuleId) {
-      setMessage("请先创建启用中的加价规则");
-      return;
-    }
-    const productIds = selectedIds.size > 0 ? Array.from(selectedIds) : undefined;
-    const response = await fetch("/api/admin/markups", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "apply-rule", ruleId: resolvedRuleId, productIds })
-    });
-    const data = await response.json() as { count?: number; message?: string };
-    if (!response.ok) {
-      setMessage(data.message ?? "应用失败");
-      return;
-    }
-    setSelectedIds(new Set());
-    setMessage(`已应用加价规则到 ${data.count ?? 0} 个商品`);
-    await loadMarkups();
-  }
-
-  async function clearMarkup() {
-    const productIds = selectedIds.size > 0 ? Array.from(selectedIds) : undefined;
-    const response = await fetch("/api/admin/markups", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "clear", productIds })
-    });
-    const data = await response.json() as { count?: number };
-    setSelectedIds(new Set());
-    setMessage(`已清空 ${data.count ?? 0} 个商品的加价`);
-    await loadMarkups();
-  }
-
-  async function clearSingleMarkup(product: ProductMarkup) {
-    const response = await fetch("/api/admin/markups", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "clear", productIds: [product.productId] })
-    });
-    if (!response.ok) {
-      const data = await response.json() as { message?: string };
-      setMessage(data.message ?? "删除失败");
-      return;
-    }
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      next.delete(product.productId);
-      return next;
-    });
-    setMessage(`已删除 ${product.name} 的加价设置`);
-    await loadMarkups();
-  }
-
   async function removeRule(rule: MarkupRule) {
-    if (!window.confirm(`确认删除规则 ${rule.name}？关联商品会保留手动加价。`)) return;
+    if (!window.confirm(`确认删除规则 ${rule.name}？`)) return;
     const response = await fetch(`/api/admin/markups?id=${encodeURIComponent(rule.id)}`, { method: "DELETE" });
-    if (!response.ok) {
-      const data = await response.json() as { message?: string };
-      setMessage(data.message ?? "删除失败");
-      return;
-    }
+    if (!response.ok) { setMessage((await readJsonSafe<{ message?: string }>(response, {})).message ?? "删除失败"); return; }
     setMessage("加价规则已删除");
-    await loadMarkups();
+    await loadRules();
+  }
+
+  const currentPageIds = products.map((p) => p.productId);
+  const allSelected = currentPageIds.length > 0 && currentPageIds.every((id) => selectedIds.has(id));
+
+  function toggleSelectAll() {
+    setSelectedIds((prev) => {
+      if (allSelected) { const next = new Set(prev); currentPageIds.forEach((id) => next.delete(id)); return next; }
+      return new Set([...prev, ...currentPageIds]);
+    });
+  }
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  }
+
+  function toggleCategory(id: string) {
+    setOpenCategories((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
   }
 
   return (
     <>
-      <AdminTop title="加价管理" subtitle={`为 ${metrics.total.toLocaleString()} 个商品设置加价规则，一键应用商品加价`}>
-        <button className="admin-light">使用帮助</button>
+      <AdminTop title="加价管理" subtitle={`共 ${metrics.total.toLocaleString()} 个商品`}>
         <button className="admin-light" onClick={() => { setEditingRule(null); setShowRuleEditor(true); }}>加价规则</button>
-        <button className="admin-light" onClick={() => void clearMarkup()}>批量操作</button>
-        <button className="admin-primary" onClick={() => void applyRule()}><Plus size={18} /> 一键应用加价</button>
+        {activeTab === "products" && (
+          <button className="admin-primary" onClick={() => void applyRuleToProducts()}><Plus size={18} /> 一键应用加价</button>
+        )}
       </AdminTop>
       {message && <div className="admin-message">{message}</div>}
       <div className="admin-metrics four markup-metrics">
-        <SmallMetric label="商品总数" value={String(filteredMetrics.total)} icon={Package} />
-        <SmallMetric label="已设置加价" value={String(filteredMetrics.configured)} icon={Tag} green />
-        <SmallMetric label="已应用加价" value={String(filteredMetrics.applied)} icon={TrendingUp} purple />
-        <SmallMetric label="未设置加价" value={String(filteredMetrics.unset)} icon={ShieldAlert} red />
+        <SmallMetric label="商品总数" value={String(metrics.total)} icon={Package} />
+        <SmallMetric label="已设置加价" value={String(metrics.configured)} icon={Tag} green />
+        <SmallMetric label="已应用加价" value={String(metrics.applied)} icon={TrendingUp} purple />
+        <SmallMetric label="未设置加价" value={String(metrics.unset)} icon={ShieldAlert} red />
       </div>
       <section className="admin-panel markup-panel">
         <div className="admin-tabs">
@@ -1108,92 +1305,109 @@ function MarkupManagementAdmin() {
           <button className={activeTab === "rules" ? "active" : ""} onClick={() => setActiveTab("rules")}>加价规则</button>
         </div>
         {activeTab === "products" ? (
-          <>
-            <div className="admin-filters markup-filters">
-              <label><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索商品名称、SKU、1688链接" /></label>
-              <select value={selectedCategory} onChange={(event) => setSelectedCategory(event.target.value)}>
-                <option value="all">所有分类</option>
-                {dbCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-              </select>
-              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-                <option value="all">加价状态</option>
-                <option value="configured">已设置</option>
-                <option value="applied">已应用</option>
-                <option value="unset">未设置</option>
-              </select>
-              <select value={ruleFilter} onChange={(event) => setRuleFilter(event.target.value)}>
-                <option value="all">加价规则</option>
-                <option value="none">无规则</option>
-                {rules.map((rule) => <option key={rule.id} value={rule.id}>{rule.name}</option>)}
-              </select>
-              <button onClick={resetFilters}><RefreshCw size={16} /> 重置</button>
-            </div>
-            <div className="markup-workspace">
-              <aside className="markup-category-tree">
-                <button className={selectedCategory === "all" ? "active" : ""} onClick={() => setSelectedCategory("all")}>
-                  <ChevronDown size={16} /> 全部分类 <span>{products.length}</span>
+          <div className="markup-layout">
+            <aside className="markup-sidebar">
+              <div className="markup-sidebar-inner">
+                <button
+                  className={selectedCategory === "all" ? "markup-cat-btn active" : "markup-cat-btn"}
+                  onClick={() => setSelectedCategory("all")}
+                >
+                  <span className="markup-cat-toggle"><ChevronDown size={13} /></span>
+                  <span className="markup-cat-name">全部分类</span>
+                  <span className="markup-cat-count">{pagination.total}</span>
                 </button>
-                {categoryTree.roots.map((category) => (
-                  <MarkupCategoryNode
-                    key={category.id}
-                    category={category}
-                    childrenByParent={categoryTree.childrenByParent}
+                {categoryTree.roots.map((cat) => (
+                  <MarkupCatNode
+                    key={cat.id}
+                    category={cat}
+                    byParent={categoryTree.byParent}
                     countById={categoryTree.countById}
                     selectedId={selectedCategory}
-                    openIds={openMarkupCategories}
+                    openIds={openCategories}
                     onSelect={setSelectedCategory}
-                    onToggle={toggleMarkupCategory}
+                    onToggle={toggleCategory}
                   />
                 ))}
-                <button className="admin-light manage-category" onClick={() => setMessage("请在左侧产品管理中进入产品分类维护分类。")}>管理分类</button>
-              </aside>
-              <div className="markup-table-wrap">
-                <div className="bulk-bar">
-                  <span>已选择 <strong>{selectedIds.size}</strong> 个商品</span>
-                  <button onClick={() => void applyRule()} disabled={selectedIds.size === 0}>应用加价规则</button>
-                  <button onClick={() => void clearMarkup()} disabled={selectedIds.size === 0}>清空加价</button>
-                  <button onClick={() => void loadMarkups()}><RefreshCw size={16} /> 刷新</button>
-                </div>
-                <table className="admin-table markup-table">
-                  <thead><tr><th><input type="checkbox" checked={pagination.pageItems.length > 0 && pagination.pageItems.every((product) => selectedIds.has(product.productId))} onChange={toggleSelectAll} /></th><th>商品信息</th><th>1688原价</th><th>当前加价</th><th>加价后价格</th><th>加价规则</th><th>操作</th></tr></thead>
+              </div>
+            </aside>
+            <div className="markup-main">
+              <div className="admin-filters">
+                <label><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索商品名称、SKU..." /></label>
+                <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                  <option value="all">加价状态</option>
+                  <option value="configured">已设置</option>
+                  <option value="applied">已应用</option>
+                  <option value="unset">未设置</option>
+                </select>
+                <select value={ruleFilter} onChange={(e) => setRuleFilter(e.target.value)}>
+                  <option value="all">加价规则</option>
+                  <option value="none">无规则</option>
+                  {rules.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                </select>
+                <button onClick={() => { setQuery(""); setStatusFilter("all"); setRuleFilter("all"); }}><RefreshCw size={15} /> 重置</button>
+              </div>
+              <div className="bulk-bar">
+                <span>已选 <strong>{selectedIds.size}</strong> 个 · 共 {pagination.total} 条</span>
+                <button onClick={() => void applyRuleToProducts()} disabled={selectedIds.size === 0}>应用规则</button>
+                <button onClick={() => void clearMarkup(Array.from(selectedIds))} disabled={selectedIds.size === 0}>清空加价</button>
+                <button onClick={() => void fetchProducts(pagination.page, pagination.pageSize)}><RefreshCw size={15} /></button>
+              </div>
+              <div className="admin-table-scroll">
+                <table className="admin-table">
+                  <thead>
+                    <tr>
+                      <th><input type="checkbox" checked={allSelected} onChange={toggleSelectAll} /></th>
+                      <th>商品信息</th>
+                      <th>1688原价</th>
+                      <th>加价比例</th>
+                      <th>加价后价格</th>
+                      <th>加价规则</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
                   <tbody>
-                    {loading && <tr><td colSpan={7}>正在从数据库加载加价数据...</td></tr>}
-                    {!loading && visibleProducts.length === 0 && <tr><td colSpan={7}>暂无商品加价数据。</td></tr>}
-                    {pagination.pageItems.map((product) => (
-                      <tr key={product.productId}>
-                        <td><input type="checkbox" checked={selectedIds.has(product.productId)} onChange={() => toggleSelect(product.productId)} /></td>
-                        <td className="product-cell"><img src={product.image} alt="" /><strong>{product.name}</strong><span>SKU：{product.sku}</span></td>
-                        <td>¥ {product.originalPrice.toFixed(2)}</td>
-                        <td><strong className={product.markupPercent > 0 ? "green-text" : ""}>+ {product.markupPercent.toFixed(0)}%</strong></td>
-                        <td><strong>¥ {product.finalPrice.toFixed(2)}</strong></td>
-                        <td><strong>{product.ruleName ?? "未设置规则"}</strong><span>{product.appliedAt ? `${formatDateTime(product.appliedAt)} 应用` : statusLabel(product.status)}</span></td>
+                    {loadingProducts && <tr><td colSpan={7}>正在加载...</td></tr>}
+                    {!loadingProducts && products.length === 0 && <tr><td colSpan={7}>暂无商品数据</td></tr>}
+                    {products.map((p) => (
+                      <tr key={p.productId}>
+                        <td><input type="checkbox" checked={selectedIds.has(p.productId)} onChange={() => toggleSelect(p.productId)} /></td>
+                        <td className="product-cell">
+                          <img src={p.image} alt="" />
+                          <strong>{p.name}</strong>
+                          <span>SKU：{p.sku}</span>
+                        </td>
+                        <td>¥ {p.originalPrice.toFixed(2)}</td>
+                        <td><strong className={p.markupPercent > 0 ? "green-text" : ""}>{p.markupPercent > 0 ? `+${p.markupPercent.toFixed(0)}%` : "—"}</strong></td>
+                        <td><strong>¥ {p.finalPrice.toFixed(2)}</strong></td>
+                        <td>
+                          <strong>{p.ruleName ?? "—"}</strong>
+                          <span>{p.status === "applied" ? "已应用" : p.status === "configured" ? "已设置" : "未设置"}</span>
+                        </td>
                         <td className="row-actions">
-                          <button onClick={() => setEditingProduct(product)}><Edit3 size={16} /></button>
-                          <button onClick={() => void applyRule(product.ruleId ?? undefined)} disabled={!product.ruleId}><MoreHorizontal size={16} /></button>
-                          <button className="danger-action" onClick={() => void clearSingleMarkup(product)}><Trash2 size={16} /></button>
+                          <button onClick={() => setEditingProduct(p)}><Edit3 size={16} /></button>
+                          <button className="danger-action" onClick={() => void clearMarkup([p.productId])}><Trash2 size={16} /></button>
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-                <PaginationFooter
-                  total={visibleProducts.length}
-                  page={pagination.page}
-                  pageSize={pagination.pageSize}
-                  totalPages={pagination.totalPages}
-                  onPageChange={pagination.setPage}
-                  onPageSizeChange={pagination.setPageSize}
-                />
               </div>
+              <PaginationFooter
+                total={pagination.total}
+                page={pagination.page}
+                pageSize={pagination.pageSize}
+                totalPages={pagination.totalPages}
+                onPageChange={(pg) => void fetchProducts(pg, pagination.pageSize)}
+                onPageSizeChange={(ps) => void fetchProducts(1, ps)}
+              />
             </div>
-          </>
+          </div>
         ) : (
           <MarkupRulesView
             rules={rules}
             categories={dbCategories}
             onCreate={() => { setEditingRule(null); setShowRuleEditor(true); }}
             onEdit={(rule) => { setEditingRule(rule); setShowRuleEditor(true); }}
-            onApply={(rule) => void applyRule(rule.id)}
             onDelete={(rule) => void removeRule(rule)}
           />
         )}
@@ -1220,107 +1434,61 @@ function MarkupManagementAdmin() {
   );
 }
 
-function MarkupRulesView({
-  rules,
-  categories,
-  onCreate,
-  onEdit,
-  onApply,
-  onDelete
-}: {
-  rules: MarkupRule[];
-  categories: Category[];
-  onCreate: () => void;
-  onEdit: (rule: MarkupRule) => void;
-  onApply: (rule: MarkupRule) => void;
-  onDelete: (rule: MarkupRule) => void;
-}) {
-  return (
-    <div className="markup-rules-view">
-      <div className="bulk-bar">
-        <span>共 <strong>{rules.length}</strong> 条规则</span>
-        <button className="admin-primary" onClick={onCreate}><Plus size={16} /> 新建规则</button>
-      </div>
-      <table className="admin-table">
-        <thead><tr><th>规则名称</th><th>适用范围</th><th>加价</th><th>状态</th><th>优先级</th><th>已应用商品</th><th>操作</th></tr></thead>
-        <tbody>
-          {rules.map((rule) => (
-            <tr key={rule.id}>
-              <td><strong>{rule.name}</strong><span>{rule.description}</span></td>
-              <td>{rule.scope === "all" ? "全部商品" : categories.find((category) => category.id === rule.categoryId)?.name ?? rule.categoryName}</td>
-              <td><strong className="green-text">+ {rule.value.toFixed(0)}%</strong></td>
-              <td><span className={rule.status === "active" ? "status-pill active" : "status-pill"}>{rule.status === "active" ? "启用" : "停用"}</span></td>
-              <td>{rule.priority}</td>
-              <td>{rule.appliedCount}</td>
-              <td className="row-actions">
-                <button onClick={() => onEdit(rule)}><Edit3 size={16} /></button>
-                <button onClick={() => onApply(rule)}><MoreHorizontal size={16} /></button>
-                <button className="danger-action" onClick={() => onDelete(rule)}><Trash2 size={16} /></button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function MarkupCategoryNode({
+function MarkupCatNode({
   category,
-  childrenByParent,
+  byParent,
   countById,
   selectedId,
   openIds,
   onSelect,
-  onToggle,
-  depth = 0
+  onToggle
 }: {
   category: CategoryWithMeta;
-  childrenByParent: Map<string | null, CategoryWithMeta[]>;
+  byParent: Map<string | null, CategoryWithMeta[]>;
   countById: Map<string, number>;
   selectedId: string;
   openIds: Set<string>;
   onSelect: (id: string) => void;
   onToggle: (id: string) => void;
-  depth?: number;
 }) {
-  const children = childrenByParent.get(category.id) ?? [];
-  const open = openIds.has(category.id);
+  const children = byParent.get(category.id) ?? [];
+  const isOpen = openIds.has(category.id);
+  const hasChildren = children.length > 0;
+  const indentStyle = category.level > 1
+    ? { marginLeft: `${(category.level - 1) * 14}px` }
+    : undefined;
   return (
-    <div className="markup-category-node">
-      <button
-        className={selectedId === category.id ? "active" : ""}
-        onClick={() => onSelect(category.id)}
-        style={{ paddingLeft: `${10 + depth * 18}px` }}
-        type="button"
-      >
-        {children.length > 0 ? (
-          <span
-            className="markup-tree-toggle"
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggle(category.id);
-            }}
+    <div className={category.level > 1 ? "markup-cat-indent" : undefined} style={indentStyle}>
+      <div className="markup-cat-row">
+        {hasChildren ? (
+          <button
+            className={`markup-cat-expand${isOpen ? " open" : ""}`}
+            onClick={() => onToggle(category.id)}
+            title={isOpen ? "收起" : "展开"}
           >
-            {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          </span>
+            {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
         ) : (
-          <span className="markup-tree-spacer" />
+          <span className="markup-cat-leaf" />
         )}
-        {category.name}
-        <span>{countById.get(category.id) ?? 0}</span>
-      </button>
-      {open && children.map((child) => (
-        <MarkupCategoryNode
+        <button
+          className={selectedId === category.id ? "markup-cat-btn active" : "markup-cat-btn"}
+          onClick={() => { onSelect(category.id); if (hasChildren && !isOpen) onToggle(category.id); }}
+        >
+          <span className="markup-cat-name">{category.name}</span>
+          <span className="markup-cat-count">{countById.get(category.id) ?? 0}</span>
+        </button>
+      </div>
+      {isOpen && children.map((child) => (
+        <MarkupCatNode
           key={child.id}
           category={child}
-          childrenByParent={childrenByParent}
+          byParent={byParent}
           countById={countById}
           selectedId={selectedId}
           openIds={openIds}
           onSelect={onSelect}
           onToggle={onToggle}
-          depth={depth + 1}
         />
       ))}
     </div>
@@ -1338,29 +1506,24 @@ function ProductMarkupModal({
   rules: MarkupRule[];
   saving: boolean;
   onClose: () => void;
-  onSubmit: (form: ProductMarkupFormState) => Promise<boolean> | boolean | void;
+  onSubmit: (form: ProductMarkupFormState) => void;
 }) {
-  const [form, setForm] = useState<ProductMarkupFormState>(() => ({
+  const [form, setForm] = useState<ProductMarkupFormState>({
     productId: product.productId,
     ruleId: product.ruleId ?? "none",
-    markupPercent: String(product.markupPercent),
-    status: product.status === "unset" ? "configured" : product.status
-  }));
+    markupPercent: String(product.markupPercent)
+  });
 
-  function update<K extends keyof ProductMarkupFormState>(key: K, value: ProductMarkupFormState[K]) {
-    if (key === "ruleId") {
-      const rule = rules.find((entry) => entry.id === value);
-      setForm((current) => ({ ...current, ruleId: value, markupPercent: rule ? String(rule.value) : current.markupPercent }));
-      return;
-    }
-    setForm((current) => ({ ...current, [key]: value }));
+  function selectRule(ruleId: string) {
+    const rule = rules.find((r) => r.id === ruleId);
+    setForm((prev) => ({ ...prev, ruleId, markupPercent: rule ? String(rule.value) : prev.markupPercent }));
   }
 
   const finalPrice = product.originalPrice * (1 + Number(form.markupPercent || 0) / 100);
 
   return (
-    <div className="admin-modal-backdrop">
-      <form className="admin-category-modal" onSubmit={(event) => { event.preventDefault(); void onSubmit(form); }}>
+    <AdminModalBackdrop>
+      <form className="admin-category-modal" onSubmit={(e) => { e.preventDefault(); onSubmit(form); }}>
         <div className="detail-head">
           <h2>编辑商品加价</h2>
           <button type="button" onClick={onClose}><X size={18} /></button>
@@ -1368,19 +1531,21 @@ function ProductMarkupModal({
         <div className="category-modal-body">
           <div className="markup-product-preview">
             <img src={product.image} alt="" />
-            <div><strong>{product.name}</strong><span>SKU：{product.sku}</span><span>{product.categoryName}</span></div>
+            <div>
+              <strong>{product.name}</strong>
+              <span>SKU：{product.sku} · {product.categoryName}</span>
+            </div>
           </div>
           <div className="category-form modal-grid">
-            <label>加价规则<select value={form.ruleId} onChange={(event) => update("ruleId", event.target.value)}>
-              <option value="none">不使用规则</option>
-              {rules.map((rule) => <option key={rule.id} value={rule.id}>{rule.name}</option>)}
-            </select></label>
-            <label>加价百分比<input type="number" min="0" step="1" value={form.markupPercent} onChange={(event) => update("markupPercent", event.target.value)} /></label>
-            <label>状态<select value={form.status} onChange={(event) => update("status", event.target.value as MarkupStatus)}>
-              <option value="configured">已设置</option>
-              <option value="applied">已应用</option>
-              <option value="unset">未设置</option>
-            </select></label>
+            <label>应用规则
+              <select value={form.ruleId} onChange={(e) => selectRule(e.target.value)}>
+                <option value="none">手动设置</option>
+                {rules.map((r) => <option key={r.id} value={r.id}>{r.name}（+{r.value}%）</option>)}
+              </select>
+            </label>
+            <label>加价百分比
+              <input type="number" min="0" step="1" value={form.markupPercent} onChange={(e) => setForm((prev) => ({ ...prev, markupPercent: e.target.value }))} />
+            </label>
             <div className="category-count-card">
               <span>加价后价格</span>
               <strong>¥ {finalPrice.toFixed(2)}</strong>
@@ -1393,9 +1558,54 @@ function ProductMarkupModal({
           <button className="admin-primary" type="submit" disabled={saving}>{saving ? "保存中..." : "保存"}</button>
         </div>
       </form>
+    </AdminModalBackdrop>
+  );
+}
+
+function MarkupRulesView({
+  rules,
+  categories,
+  onCreate,
+  onEdit,
+  onDelete
+}: {
+  rules: MarkupRule[];
+  categories: Category[];
+  onCreate: () => void;
+  onEdit: (rule: MarkupRule) => void;
+  onDelete: (rule: MarkupRule) => void;
+}) {
+  return (
+    <div className="markup-rules-view">
+      <div className="bulk-bar">
+        <span>共 <strong>{rules.length}</strong> 条规则</span>
+        <button className="admin-primary" onClick={onCreate}><Plus size={16} /> 新建规则</button>
+      </div>
+      <div className="admin-table-scroll">
+        <table className="admin-table">
+          <thead><tr><th>规则名称</th><th>适用范围</th><th>加价</th><th>状态</th><th>优先级</th><th>已应用商品</th><th>操作</th></tr></thead>
+          <tbody>
+            {rules.map((rule) => (
+              <tr key={rule.id}>
+                <td><strong>{rule.name}</strong><span>{rule.description}</span></td>
+                <td>{rule.scope === "all" ? "全部商品" : categories.find((c) => c.id === rule.categoryId)?.name ?? rule.categoryName}</td>
+                <td><strong className="green-text">+{rule.value.toFixed(0)}%</strong></td>
+                <td><span className={rule.status === "active" ? "status-pill active" : "status-pill"}>{rule.status === "active" ? "启用" : "停用"}</span></td>
+                <td>{rule.priority}</td>
+                <td>{rule.appliedCount}</td>
+                <td className="row-actions">
+                  <button onClick={() => onEdit(rule)}><Edit3 size={16} /></button>
+                  <button className="danger-action" onClick={() => onDelete(rule)}><Trash2 size={16} /></button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
+
 
 function MarkupRuleModal({
   rule,
@@ -1427,7 +1637,7 @@ function MarkupRuleModal({
   }
 
   return (
-    <div className="admin-modal-backdrop">
+    <AdminModalBackdrop>
       <form className="admin-category-modal" onSubmit={(event) => { event.preventDefault(); void onSubmit(form); }}>
         <div className="detail-head">
           <h2>{rule ? "编辑加价规则" : "新建加价规则"}</h2>
@@ -1457,7 +1667,7 @@ function MarkupRuleModal({
           <button className="admin-primary" type="submit" disabled={saving}>{saving ? "保存中..." : "保存"}</button>
         </div>
       </form>
-    </div>
+    </AdminModalBackdrop>
   );
 }
 
@@ -1466,29 +1676,42 @@ function ProductCategoriesAdmin() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draftParentId, setDraftParentId] = useState<string | null>(null);
   const [editingCategory, setEditingCategory] = useState<CategoryWithMeta | null>(null);
+  const [creatingCategory, setCreatingCategory] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["wood"]));
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [levelFilter, setLevelFilter] = useState("all");
+  const [categorySort, setCategorySort] = useState<{ key: CategorySortKey; direction: SortDirection }>({ key: "tree", direction: "asc" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
+  const [draggingCategoryId, setDraggingCategoryId] = useState<string | null>(null);
+  const [dropTargetCategoryId, setDropTargetCategoryId] = useState<string | null>(null);
+  const [dropMode, setDropMode] = useState<CategoryDropMode>("inside");
+  const [message, setMessage] = useAutoDismissMessage();
+  const categorySelectionInitialized = useRef(false);
 
   const selected = selectedId ? rows.find((category) => category.id === selectedId) ?? null : null;
-  const childrenByParent = useMemo(() => {
+	  const childrenByParent = useMemo(() => {
     const map = new Map<string | null, CategoryWithMeta[]>();
     rows.forEach((category) => {
       const key = category.parentId ?? null;
       map.set(key, [...(map.get(key) ?? []), category]);
     });
     map.forEach((items) => items.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name)));
-    return map;
-  }, [rows]);
-  const visibleRows = useMemo(() => {
+	    return map;
+	  }, [rows]);
+  const expandableCategoryIds = useMemo(
+    () => rows.filter((category) => (childrenByParent.get(category.id) ?? []).length > 0).map((category) => category.id),
+    [childrenByParent, rows]
+  );
+  const allExpandableCategoriesExpanded = expandableCategoryIds.length > 0 && expandableCategoryIds.every((id) => expanded.has(id));
+	  const visibleRows = useMemo(() => {
     const keyword = query.trim().toLowerCase();
     const output: CategoryWithMeta[] = [];
     const visit = (category: CategoryWithMeta): boolean => {
       const matchQuery = !keyword || `${category.name} ${category.nameEn}`.toLowerCase().includes(keyword);
       const matchStatus = statusFilter === "all" || category.status === statusFilter;
+      const matchLevel = levelFilter === "all" || category.level === Number(levelFilter);
       const childOutput: CategoryWithMeta[] = [];
       let childMatched = false;
       if (expanded.has(category.id) || keyword) {
@@ -1498,7 +1721,7 @@ function ProductCategoriesAdmin() {
           childOutput.push(...output.splice(before));
         });
       }
-      const selfMatched = matchQuery && matchStatus;
+      const selfMatched = matchQuery && matchStatus && matchLevel;
       if (selfMatched || childMatched) {
         output.push(category, ...childOutput);
         return true;
@@ -1509,26 +1732,34 @@ function ProductCategoriesAdmin() {
     (childrenByParent.get(null) ?? []).forEach((category) => {
       void visit(category);
     });
-    return output;
-  }, [childrenByParent, expanded, query, statusFilter]);
+    if (categorySort.key === "tree") return output;
+    return [...output].sort((a, b) => {
+      const left = categorySort.key === "level" ? a.level : categorySort.key === "sortOrder" ? a.sortOrder : a.productCount;
+      const right = categorySort.key === "level" ? b.level : categorySort.key === "sortOrder" ? b.sortOrder : b.productCount;
+      const result = left - right || a.name.localeCompare(b.name);
+      return categorySort.direction === "asc" ? result : -result;
+    });
+  }, [categorySort, childrenByParent, expanded, levelFilter, query, statusFilter]);
   const filteredMetrics = {
-    total: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter)).length,
-    level1: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter) && category.level === 1).length,
-    level2: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter) && category.level === 2).length,
-    level3: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter) && category.level === 3).length,
-    active: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter) && category.status === "active").length,
-    linkedProducts: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter)).reduce((sum, category) => sum + category.productCount, 0)
+    total: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter)).length,
+    level1: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter) && category.level === 1).length,
+    level2: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter) && category.level === 2).length,
+    level3: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter) && category.level === 3).length,
+    active: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter) && category.status === "active").length,
+    linkedProducts: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter)).reduce((sum, category) => sum + category.productCount, 0)
   };
-  const pagination = usePagination(visibleRows, `${query}|${statusFilter}|${Array.from(expanded).sort().join(",")}`);
-
   async function loadCategories() {
     setLoading(true);
     await fetch("/api/admin/categories")
       .then((response) => response.json())
-      .then((data: { categories: CategoryWithMeta[] }) => {
-        setRows(data.categories);
-        setSelectedId((current) => current ?? data.categories[0]?.id ?? null);
-      })
+	      .then((data: { categories: CategoryWithMeta[] }) => {
+	        setRows(data.categories);
+	        setSelectedId((current) => {
+	          if (current || categorySelectionInitialized.current) return current;
+	          categorySelectionInitialized.current = true;
+	          return data.categories[0]?.id ?? null;
+	        });
+	      })
       .finally(() => setLoading(false));
   }
 
@@ -1551,35 +1782,60 @@ function ProductCategoriesAdmin() {
     });
   }
 
-  function expandAll() {
-    setExpanded(new Set(rows.map((category) => category.id)));
-  }
+	  function expandAll() {
+	    if (allExpandableCategoriesExpanded) {
+	      setExpanded(new Set());
+	      return;
+	    }
+	    setExpanded(new Set(expandableCategoryIds));
+	  }
 
-  function resetFilters() {
+	  function resetFilters() {
     setQuery("");
     setStatusFilter("all");
-    setExpanded(new Set(["wood"]));
+    setLevelFilter("all");
+    setCategorySort({ key: "tree", direction: "asc" });
+	    setExpanded(new Set(expandableCategoryIds));
+	  }
+
+  function toggleCategorySort(key: CategorySortKey) {
+    setCategorySort((current) => (
+      current.key === key
+        ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+        : { key, direction: "desc" }
+    ));
   }
 
-  function createTopCategory() {
-    setSelectedId(null);
-    setDraftParentId(null);
+  function sortMark(key: CategorySortKey) {
+    if (categorySort.key !== key) return "";
+    return categorySort.direction === "asc" ? " ↑" : " ↓";
   }
+
+	  function createTopCategory() {
+	    setSelectedId(null);
+	    setDraftParentId(null);
+	    setEditingCategory(null);
+	    setCreatingCategory(true);
+	  }
 
   function createChildCategory(parent: CategoryWithMeta) {
-    setSelectedId(null);
-    setDraftParentId(parent.id);
-    setExpanded((current) => new Set(current).add(parent.id));
-    setMessage(`正在为「${parent.name}」添加子分类，请在右侧填写后保存。`);
+	    setSelectedId(null);
+	    setDraftParentId(parent.id);
+	    setEditingCategory(null);
+	    setCreatingCategory(true);
+	    setExpanded((current) => new Set(current).add(parent.id));
+    setMessage(`正在为「${parent.name}」添加子分类，请在弹窗中填写后保存。`);
   }
 
-  function selectCategory(id: string) {
-    setDraftParentId(null);
-    setSelectedId(id);
-  }
+	  function selectCategory(id: string) {
+	    setCreatingCategory(false);
+	    setDraftParentId(null);
+	    setSelectedId(id);
+	  }
 
-  function openCategoryEditor(category: CategoryWithMeta) {
-    setDraftParentId(null);
+	  function openCategoryEditor(category: CategoryWithMeta) {
+	    setCreatingCategory(false);
+	    setDraftParentId(null);
     setSelectedId(category.id);
     setEditingCategory(category);
   }
@@ -1612,9 +1868,10 @@ function ProductCategoriesAdmin() {
       return false;
     }
     const data = await response.json() as { category: CategoryWithMeta };
-    setSelectedId(data.category.id);
-    setDraftParentId(null);
-    setEditingCategory(null);
+	    setSelectedId(data.category.id);
+	    setDraftParentId(null);
+	    setEditingCategory(null);
+	    setCreatingCategory(false);
     setExpanded((current) => {
       const next = new Set(current);
       if (data.category.parentId) next.add(data.category.parentId);
@@ -1626,12 +1883,90 @@ function ProductCategoriesAdmin() {
   }
 
   async function toggleStatus(category: CategoryWithMeta) {
-    await fetch("/api/admin/categories", {
+    setRows((current) => current.map((entry) => entry.id === category.id ? { ...entry, status: category.status === "active" ? "inactive" : "active" } : entry));
+    const response = await fetch("/api/admin/categories", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...category, status: category.status === "active" ? "inactive" : "active" })
     });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({})) as { message?: string };
+      setMessage(data.message ?? "状态更新失败");
+      await loadCategories();
+      return;
+    }
     setMessage(category.status === "active" ? "分类已停用" : "分类已启用");
+    await loadCategories();
+  }
+
+  async function reorderCategory(dragId: string, targetId: string, mode: CategoryDropMode) {
+    if (dragId === targetId) return;
+    const dragged = rows.find((category) => category.id === dragId);
+    const target = rows.find((category) => category.id === targetId);
+    if (!dragged || !target) return;
+
+    const descendantIds = collectDescendantCategoryIds(dragged.id, rows);
+    if (descendantIds.has(target.id)) {
+      setMessage("不能把分类移动到自己的下级分类中。");
+      return;
+    }
+
+    const moveAsChild = mode === "inside" && target.level < 3;
+    const nextParentId = moveAsChild ? target.id : target.parentId;
+    const nextLevel = moveAsChild ? target.level + 1 : target.level;
+    const maxDescendantOffset = Math.max(0, ...rows
+      .filter((category) => descendantIds.has(category.id))
+      .map((category) => category.level - dragged.level));
+    if (nextLevel + maxDescendantOffset > 3) {
+      setMessage("该分类包含下级分类，移动后会超过三级分类限制。");
+      return;
+    }
+
+    const siblings = rows
+      .filter((category) => (category.parentId ?? null) === (nextParentId ?? null) && category.id !== dragged.id)
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    const targetIndex = siblings.findIndex((category) => category.id === target.id);
+    const insertIndex = moveAsChild
+      ? siblings.length
+      : targetIndex < 0
+        ? siblings.length
+        : mode === "before" ? targetIndex : targetIndex + 1;
+    const movedCategory = { ...dragged, parentId: nextParentId ?? null, level: nextLevel };
+    const reordered = [...siblings];
+    reordered.splice(insertIndex, 0, movedCategory);
+    const changed = reordered.filter((category, index) => (
+      category.id === movedCategory.id ||
+      category.sortOrder !== index + 1 ||
+      (category.parentId ?? null) !== (nextParentId ?? null)
+    ));
+    if (!changed.length) return;
+
+    const sortById = new Map(reordered.map((category, index) => [category.id, { sortOrder: index + 1, parentId: nextParentId ?? null, level: category.id === movedCategory.id ? nextLevel : category.level }]));
+    setRows((current) => current.map((category) => {
+      const next = sortById.get(category.id);
+      return next ? { ...category, parentId: next.parentId, level: next.level, sortOrder: next.sortOrder } : category;
+    }));
+    const updates = reordered.map((category, index) => fetch("/api/admin/categories", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...category,
+        parentId: category.id === movedCategory.id ? nextParentId : category.parentId,
+        level: category.id === movedCategory.id ? nextLevel : category.level,
+        sortOrder: index + 1
+      })
+    }));
+    const responses = await Promise.all(updates);
+    if (responses.some((response) => !response.ok)) {
+      setMessage("分类移动失败，已重新加载分类。");
+      await loadCategories();
+      return;
+    }
+    if (moveAsChild) {
+      setExpanded((current) => new Set(current).add(target.id));
+    }
+    setSelectedId(dragged.id);
+    setMessage(moveAsChild ? `已移动到「${target.name}」下级` : "分类层级/排序已更新");
     await loadCategories();
   }
 
@@ -1672,18 +2007,71 @@ function ProductCategoriesAdmin() {
               <option value="active">启用</option>
               <option value="inactive">停用</option>
             </select>
-            <button onClick={expandAll}><ChevronDown size={16} /> 展开全部</button>
+            <select value={levelFilter} onChange={(event) => setLevelFilter(event.target.value)}>
+              <option value="all">级别：全部</option>
+              <option value="1">一级</option>
+              <option value="2">二级</option>
+              <option value="3">三级</option>
+            </select>
+	            <button className={allExpandableCategoriesExpanded ? "filter-toggle active" : "filter-toggle"} onClick={expandAll}>
+	              <span className="mini-switch" aria-hidden="true" />
+	              {allExpandableCategoriesExpanded ? "全部展开" : "全部收起"}
+            </button>
             <button onClick={resetFilters}><RefreshCw size={16} /> 重置</button>
           </div>
+          <div className="admin-table-scroll">
           <table className="admin-table category-table">
-            <thead><tr><th>分类名称</th><th>图标</th><th>级别</th><th>排序</th><th>产品数量</th><th>状态</th><th>操作</th></tr></thead>
+            <thead><tr><th>排序</th><th>分类名称</th><th>图标</th><th><button className="th-sort" onClick={() => toggleCategorySort("level")}>级别{sortMark("level")}</button></th><th><button className="th-sort" onClick={() => toggleCategorySort("sortOrder")}>排序值{sortMark("sortOrder")}</button></th><th><button className="th-sort" onClick={() => toggleCategorySort("productCount")}>产品数量{sortMark("productCount")}</button></th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
-              {loading && <tr><td colSpan={7}>正在从数据库加载分类...</td></tr>}
-              {!loading && visibleRows.length === 0 && <tr><td colSpan={7}>暂无分类数据。</td></tr>}
-              {pagination.pageItems.map((category) => {
+              {loading && <tr><td colSpan={8}>正在从数据库加载分类...</td></tr>}
+              {!loading && visibleRows.length === 0 && <tr><td colSpan={8}>暂无分类数据。</td></tr>}
+              {visibleRows.map((category) => {
                 const hasChildren = (childrenByParent.get(category.id) ?? []).length > 0;
                 return (
-                  <tr key={category.id} className={selected?.id === category.id ? "selected" : ""} onClick={() => selectCategory(category.id)}>
+                  <tr
+                    key={category.id}
+                    className={`${selected?.id === category.id ? "selected" : ""} ${draggingCategoryId === category.id ? "dragging" : ""} ${dropTargetCategoryId === category.id ? `drop-target drop-${dropMode}` : ""}`}
+                    onClick={() => selectCategory(category.id)}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      const offset = event.clientY - rect.top;
+                      const nextMode: CategoryDropMode = offset < rect.height * 0.25 ? "before" : offset > rect.height * 0.75 ? "after" : "inside";
+                      if (dropTargetCategoryId !== category.id) setDropTargetCategoryId(category.id);
+                      if (dropMode !== nextMode) setDropMode(nextMode);
+                      event.dataTransfer.dropEffect = "move";
+                    }}
+                    onDragLeave={() => setDropTargetCategoryId((current) => current === category.id ? null : current)}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const dragId = event.dataTransfer.getData("text/plain") || draggingCategoryId;
+                      setDraggingCategoryId(null);
+                      setDropTargetCategoryId(null);
+                      if (dragId) void reorderCategory(dragId, category.id, dropMode);
+                    }}
+                    onDragEnd={() => {
+                      setDraggingCategoryId(null);
+                      setDropTargetCategoryId(null);
+                    }}
+                  >
+                    <td>
+                      <button
+                        type="button"
+                        className="drag-handle"
+                        title="拖动排序"
+                        aria-label="拖动排序"
+                        draggable
+                        onClick={(event) => event.stopPropagation()}
+                        onDragStart={(event) => {
+                          event.stopPropagation();
+                          setDraggingCategoryId(category.id);
+                          event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData("text/plain", category.id);
+                        }}
+                      >
+                        <GripVertical size={16} />
+                      </button>
+                    </td>
                     <td>
                       <div className="category-name-cell" style={{ paddingLeft: `${(category.level - 1) * 28}px` }}>
                         {hasChildren ? (
@@ -1704,11 +2092,16 @@ function ProductCategoriesAdmin() {
                     <td><span className="level-pill">{category.level === 1 ? "一级" : category.level === 2 ? "二级" : "三级"}</span></td>
                     <td>{category.sortOrder}</td>
                     <td>{category.productCount}</td>
-                    <td><span className={category.status === "active" ? "status-pill active" : "status-pill"}>{category.status === "active" ? "启用" : "停用"}</span></td>
+                    <td>
+                      <button
+                        className={category.status === "active" ? "toggle on" : "toggle"}
+                        aria-label={category.status === "active" ? "点击停用分类" : "点击启用分类"}
+                        onClick={(event) => { event.stopPropagation(); void toggleStatus(category); }}
+                      />
+                    </td>
                     <td className="row-actions">
                       <button onClick={(event) => { event.stopPropagation(); openCategoryEditor(category); }}><Edit3 size={16} /></button>
                       <button onClick={(event) => { event.stopPropagation(); createChildCategory(category); }}><Plus size={16} /></button>
-                      <button onClick={(event) => { event.stopPropagation(); void toggleStatus(category); }}><MoreHorizontal size={16} /></button>
                       <button className="danger-action" onClick={(event) => { event.stopPropagation(); void removeCategory(category); }}><Trash2 size={16} /></button>
                     </td>
                   </tr>
@@ -1716,30 +2109,27 @@ function ProductCategoriesAdmin() {
               })}
             </tbody>
           </table>
-          <PaginationFooter
-            total={visibleRows.length}
-            page={pagination.page}
-            pageSize={pagination.pageSize}
-            totalPages={pagination.totalPages}
-            onPageChange={pagination.setPage}
-            onPageSizeChange={pagination.setPageSize}
-          />
+          </div>
         </section>
         <CategoryDetail
           category={selected}
           categories={rows}
           draftParentId={draftParentId}
           saving={saving}
-          onSubmit={saveCategory}
+          onCreateTop={createTopCategory}
+          onEdit={openCategoryEditor}
+          onCreateChild={createChildCategory}
           onToggle={toggleStatus}
         />
       </div>
-      {editingCategory && (
-        <CategoryEditorModal
+	      {(editingCategory || creatingCategory) && (
+	        <CategoryEditorModal
+	          key={editingCategory?.id ?? draftParentId ?? "new-root-category"}
           category={editingCategory}
           categories={rows}
+          draftParentId={draftParentId}
           saving={saving}
-          onClose={() => setEditingCategory(null)}
+	          onClose={() => { setEditingCategory(null); setDraftParentId(null); setCreatingCategory(false); if (!selectedId) setSelectedId(rows[0]?.id ?? null); }}
           onSubmit={saveCategory}
         />
       )}
@@ -1752,82 +2142,69 @@ function CategoryDetail({
   categories,
   draftParentId,
   saving,
-  onSubmit,
+  onCreateTop,
+  onEdit,
+  onCreateChild,
   onToggle
 }: {
   category: CategoryWithMeta | null;
   categories: CategoryWithMeta[];
   draftParentId: string | null;
   saving: boolean;
-  onSubmit: (form: CategoryFormState) => Promise<boolean> | boolean | void;
+  onCreateTop: () => void;
+  onEdit: (category: CategoryWithMeta) => void;
+  onCreateChild: (category: CategoryWithMeta) => void;
   onToggle: (category: CategoryWithMeta) => void;
 }) {
-  const [form, setForm] = useState<CategoryFormState>(() => categoryToForm(category, categories, draftParentId));
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setForm(categoryToForm(category, categories, draftParentId));
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [category, categories, draftParentId]);
-
-  const parentOptions = categories.filter((entry) => entry.id !== form.id && entry.level < 3);
-  const parent = categories.find((entry) => entry.id === form.parentId);
-
-  function update<K extends keyof CategoryFormState>(key: K, value: CategoryFormState[K]) {
-    setForm((current) => {
-      if (key === "parentId") {
-        const parentId = String(value ?? "none");
-        const selectedParent = categories.find((entry) => entry.id === parentId);
-        return { ...current, parentId, level: selectedParent ? String(Math.min(selectedParent.level + 1, 3)) : "1" };
-      }
-      return { ...current, [key]: value };
-    });
-  }
+  const parent = category ? categories.find((entry) => entry.id === category.parentId) ?? null : null;
+  const childCount = category ? categories.filter((entry) => entry.parentId === category.id).length : 0;
 
   return (
     <aside className="admin-detail category-detail">
-      <form onSubmit={(event) => { event.preventDefault(); onSubmit(form); }}>
-        <div className="detail-head"><h2>分类详情</h2><X size={18} /></div>
+      {category ? (
+        <>
+        <div className="detail-head"><h2>分类详情</h2><span>只读</span></div>
         <div className="category-preview">
-          <span>{iconGlyph(form.icon)}</span>
-          <strong>{form.name || "新分类"} <em>{form.nameEn || "New Category"}</em></strong>
-          <i>{form.status === "active" ? "启用" : "停用"}</i>
+          <span>{iconGlyph(category.icon)}</span>
+          <strong>{category.name} <em>{category.nameEn}</em></strong>
+          <i>{category.status === "active" ? "启用" : "停用"}</i>
         </div>
         <h3>基本信息</h3>
-        <div className="category-form">
-          <label>分类名称（中文）<input required value={form.name} onChange={(event) => update("name", event.target.value)} /></label>
-          <label>分类名称（英文）<input required value={form.nameEn} onChange={(event) => update("nameEn", event.target.value)} /></label>
-          <label>上级分类<select value={form.parentId} onChange={(event) => update("parentId", event.target.value)}>
-            <option value="none">一级分类</option>
-            {parentOptions.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
-          </select></label>
-          <label>分类图标<input value={form.icon} onChange={(event) => update("icon", event.target.value)} /></label>
-          <div className="inline-fields">
-            <label>排序<input type="number" min="1" value={form.sortOrder} onChange={(event) => update("sortOrder", event.target.value)} /></label>
-            <label>状态<select value={form.status} onChange={(event) => update("status", event.target.value as CategoryStatus)}>
-              <option value="active">启用</option>
-              <option value="inactive">停用</option>
-            </select></label>
-          </div>
-          <div className="category-count-card">
-            <span>产品数量</span>
-            <strong>{category?.productCount ?? 0}</strong>
-            <em>{parent ? `${parent.name} 下级分类` : "顶级分类"}</em>
-          </div>
-          <label>分类描述<textarea maxLength={200} value={form.description} onChange={(event) => update("description", event.target.value)} /></label>
+        <div className="detail-kv">
+          <span>中文名称</span><strong>{category.name}</strong>
+          <span>英文名称</span><strong>{category.nameEn}</strong>
+          <span>上级分类</span><strong>{parent?.name ?? "一级分类"}</strong>
+          <span>分类级别</span><strong><span className="level-pill">{category.level === 1 ? "一级" : category.level === 2 ? "二级" : "三级"}</span></strong>
+          <span>展示状态</span><strong><span className={category.status === "active" ? "status-pill active" : "status-pill"}>{category.status === "active" ? "启用" : "停用"}</span></strong>
+          <span>排序</span><strong>{category.sortOrder}</strong>
         </div>
+        <div className="detail-stats">
+          <span>产品数量 <strong>{category.productCount}</strong></span>
+          <span>子分类 <strong>{childCount}</strong></span>
+        </div>
+        <h3>分类描述</h3>
+        <p className="category-readonly-text">{category.description || "暂无描述"}</p>
         <h3>SEO设置</h3>
-        <div className="category-form">
-          <label>Meta 标题（SEO）<input value={form.metaTitle} onChange={(event) => update("metaTitle", event.target.value)} /></label>
-          <label>Meta 描述（SEO）<textarea maxLength={160} value={form.metaDescription} onChange={(event) => update("metaDescription", event.target.value)} /></label>
+        <div className="detail-kv">
+          <span>Meta 标题</span><strong>{category.metaTitle || "-"}</strong>
+          <span>Meta 描述</span><strong>{category.metaDescription || "-"}</strong>
         </div>
         <div className="detail-actions">
-          {category && <button className="admin-light" type="button" onClick={() => void onToggle(category)}>{category.status === "active" ? "停用" : "启用"}</button>}
-          <button className="admin-light" type="button" onClick={() => setForm(categoryToForm(category, categories, draftParentId))}>取消</button>
-          <button className="admin-primary" type="submit" disabled={saving}>{saving ? "保存中..." : "保存"}</button>
+          <button className="admin-light" type="button" disabled={saving} onClick={() => void onToggle(category)}>{category.status === "active" ? "停用" : "启用"}</button>
+          <button className="admin-light" type="button" onClick={() => onCreateChild(category)}><Plus size={16} /> 添加子分类</button>
+          <button className="admin-primary" type="button" onClick={() => onEdit(category)}><Edit3 size={16} /> 编辑</button>
         </div>
-      </form>
+        </>
+      ) : (
+        <>
+          <div className="detail-head"><h2>分类详情</h2><span>只读</span></div>
+          <div className="category-empty-detail">
+            <strong>{draftParentId ? "正在创建子分类" : "请选择分类"}</strong>
+            <p>{draftParentId ? "请在弹窗中完成子分类信息。" : "从左侧列表选择分类查看详情，或新建一级分类。"}</p>
+            <button className="admin-primary" type="button" onClick={onCreateTop}><Plus size={16} /> 添加一级分类</button>
+          </div>
+        </>
+      )}
     </aside>
   );
 }
@@ -1835,17 +2212,19 @@ function CategoryDetail({
 function CategoryEditorModal({
   category,
   categories,
+  draftParentId,
   saving,
   onClose,
   onSubmit
 }: {
-  category: CategoryWithMeta;
+  category: CategoryWithMeta | null;
   categories: CategoryWithMeta[];
+  draftParentId?: string | null;
   saving: boolean;
   onClose: () => void;
   onSubmit: (form: CategoryFormState) => Promise<boolean> | boolean | void;
 }) {
-  const [form, setForm] = useState<CategoryFormState>(() => categoryToForm(category, categories));
+  const [form, setForm] = useState<CategoryFormState>(() => categoryToForm(category, categories, draftParentId ?? null));
   const parentOptions = categories.filter((entry) => entry.id !== form.id && entry.level < 3);
   const parent = categories.find((entry) => entry.id === form.parentId);
 
@@ -1868,10 +2247,10 @@ function CategoryEditorModal({
   }
 
   return (
-    <div className="admin-modal-backdrop">
+    <AdminModalBackdrop>
       <form className="admin-category-modal" onSubmit={(event) => { event.preventDefault(); void handleSubmit(); }}>
         <div className="detail-head">
-          <h2>编辑分类</h2>
+          <h2>{category ? "编辑分类" : "新增分类"}</h2>
           <button type="button" onClick={onClose}><X size={18} /></button>
         </div>
         <div className="category-modal-body">
@@ -1888,7 +2267,23 @@ function CategoryEditorModal({
               <option value="none">一级分类</option>
               {parentOptions.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
             </select></label>
-            <label>分类图标<input value={form.icon} onChange={(event) => update("icon", event.target.value)} /></label>
+            <div className="category-icon-picker">
+              <span>分类图标</span>
+              <div>
+                {CATEGORY_ICON_OPTIONS.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={form.icon === option.id ? "active" : ""}
+                    onClick={() => update("icon", option.id)}
+                    aria-label={`选择${option.label}图标`}
+                  >
+                    <strong>{option.glyph}</strong>
+                    <em>{option.label}</em>
+                  </button>
+                ))}
+              </div>
+            </div>
             <label>排序<input type="number" min="1" value={form.sortOrder} onChange={(event) => update("sortOrder", event.target.value)} /></label>
             <label>状态<select value={form.status} onChange={(event) => update("status", event.target.value as CategoryStatus)}>
               <option value="active">启用</option>
@@ -1896,7 +2291,7 @@ function CategoryEditorModal({
             </select></label>
             <div className="category-count-card">
               <span>产品数量</span>
-              <strong>{category.productCount}</strong>
+              <strong>{category?.productCount ?? 0}</strong>
               <em>{parent ? `${parent.name} 下级分类` : "顶级分类"}</em>
             </div>
             <label>分类描述<textarea maxLength={200} value={form.description} onChange={(event) => update("description", event.target.value)} /></label>
@@ -1912,7 +2307,7 @@ function CategoryEditorModal({
           <button className="admin-primary" type="submit" disabled={saving}>{saving ? "保存中..." : "保存"}</button>
         </div>
       </form>
-    </div>
+    </AdminModalBackdrop>
   );
 }
 
@@ -1935,18 +2330,31 @@ function categoryToForm(category: CategoryWithMeta | null, categories: CategoryW
   };
 }
 
-function categoryMatchesFilter(category: CategoryWithMeta, query: string, statusFilter: string) {
+function collectDescendantCategoryIds(categoryId: string, categories: CategoryWithMeta[]) {
+  const childrenByParent = new Map<string, CategoryWithMeta[]>();
+  categories.forEach((category) => {
+    if (!category.parentId) return;
+    childrenByParent.set(category.parentId, [...(childrenByParent.get(category.parentId) ?? []), category]);
+  });
+  const output = new Set<string>();
+  const visit = (id: string) => {
+    (childrenByParent.get(id) ?? []).forEach((child) => {
+      output.add(child.id);
+      visit(child.id);
+    });
+  };
+  visit(categoryId);
+  return output;
+}
+
+function categoryMatchesFilter(category: CategoryWithMeta, query: string, statusFilter: string, levelFilter = "all") {
   const keyword = query.trim().toLowerCase();
   const matchQuery = !keyword || `${category.name} ${category.nameEn}`.toLowerCase().includes(keyword);
   const matchStatus = statusFilter === "all" || category.status === statusFilter;
-  return matchQuery && matchStatus;
+  const matchLevel = levelFilter === "all" || category.level === Number(levelFilter);
+  return matchQuery && matchStatus && matchLevel;
 }
 
-function statusLabel(status: MarkupStatus) {
-  if (status === "applied") return "已应用";
-  if (status === "configured") return "已设置";
-  return "未设置";
-}
 
 function formatDateTime(value: string) {
   const date = new Date(value);
@@ -1969,15 +2377,7 @@ function countryFlag(country: string) {
 }
 
 function iconGlyph(icon: string) {
-  const map: Record<string, string> = {
-    hanger: "⎇",
-    shirt: "♙",
-    sparkles: "✦",
-    layers: "▧",
-    grip: "▥",
-    boxes: "□"
-  };
-  return map[icon] ?? "⎇";
+  return CATEGORY_ICON_OPTIONS.find((option) => option.id === icon)?.glyph ?? "⎇";
 }
 
 function ProductDetail({
@@ -1993,10 +2393,17 @@ function ProductDetail({
   onToggle: (product: ProductWithStatus) => void;
   onDelete: (product: ProductWithStatus) => void;
 }) {
+  const productImages = uniqueProductImages(product);
+  const [previewImageIndex, setPreviewImageIndex] = useState<number | null>(null);
+  const visibleThumbs = productImages.slice(0, 4);
+  const remainingImageCount = Math.max(productImages.length - visibleThumbs.length, 0);
+
   return (
     <aside className="admin-detail">
       <div className="detail-head"><h2>产品详情</h2><X size={18} /></div>
-      <img className="detail-product-img" src={product.image} alt={product.name} />
+      <button className="detail-product-image-button" type="button" onClick={() => setPreviewImageIndex(0)}>
+        <img className="detail-product-img" src={product.image} alt={product.name} />
+      </button>
       <h3>{product.name}<span>{product.status === "active" ? "上架中" : "已下架"}</span></h3>
       <div className="detail-kv">
         <span>SKU:</span><strong>{product.sku}</strong>
@@ -2008,8 +2415,16 @@ function ProductDetail({
         <span>库存:</span><strong>{product.stock.toLocaleString()}</strong>
       </div>
       <div className="thumbs">
-        {product.specs.map((spec) => <img src={spec.image ?? product.image} alt="" key={spec.id} />)}
-        <span>+6</span>
+        {visibleThumbs.map((image, index) => (
+          <button type="button" key={`${image}-${index}`} onClick={() => setPreviewImageIndex(index)}>
+            <img src={image} alt={`${product.name} 图片 ${index + 1}`} />
+          </button>
+        ))}
+        {remainingImageCount > 0 && (
+          <button className="thumb-more" type="button" onClick={() => setPreviewImageIndex(visibleThumbs.length)}>
+            +{remainingImageCount}
+          </button>
+        )}
       </div>
       <h3>多币种价格</h3>
       <div className="currency-grid">
@@ -2027,7 +2442,71 @@ function ProductDetail({
         <button className="admin-light" onClick={() => void onToggle(product)}>{product.status === "active" ? "下架产品" : "上架产品"}</button>
         <button className="admin-light danger" onClick={() => void onDelete(product)}>删除产品</button>
       </div>
+      {previewImageIndex !== null && (
+        <ImagePreviewModal
+          images={productImages}
+          initialIndex={previewImageIndex}
+          title={product.name}
+          onClose={() => setPreviewImageIndex(null)}
+        />
+      )}
     </aside>
+  );
+}
+
+function uniqueProductImages(product: ProductWithStatus) {
+  return normalizeImageList(product.specs.map((spec) => spec.image ?? "").filter(Boolean), product.image);
+}
+
+function normalizeImageList(images: string[], fallback: string) {
+  const normalized = [fallback, ...images]
+    .map((image) => image.trim())
+    .filter(Boolean);
+  return Array.from(new Set(normalized));
+}
+
+function ImagePreviewModal({
+  images,
+  initialIndex,
+  title,
+  onClose
+}: {
+  images: string[];
+  initialIndex: number;
+  title: string;
+  onClose: () => void;
+}) {
+  const [activeIndex, setActiveIndex] = useState(initialIndex);
+  const activeThumbRef = useRef<HTMLButtonElement | null>(null);
+  const image = images[activeIndex] ?? images[0];
+
+  useEffect(() => {
+    activeThumbRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+  }, [activeIndex]);
+
+  return (
+    <AdminModalBackdrop>
+      <div className="image-preview-modal">
+        <button className="image-preview-close" type="button" onClick={onClose}><X size={20} /></button>
+        <img src={image} alt={title} />
+        <strong>{title} <span>{activeIndex + 1} / {images.length}</span></strong>
+        {images.length > 1 && (
+          <div className="image-preview-thumbs">
+            {images.map((item, index) => (
+              <button
+                className={activeIndex === index ? "active" : ""}
+                type="button"
+                key={`${item}-${index}`}
+                ref={activeIndex === index ? activeThumbRef : null}
+                onClick={() => setActiveIndex(index)}
+              >
+                <img src={item} alt={`${title} 缩略图 ${index + 1}`} />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </AdminModalBackdrop>
   );
 }
 
@@ -2044,13 +2523,14 @@ function ProductEditor({
   onClose: () => void;
   onSubmit: (form: ProductFormState) => void;
 }) {
+  const initialImages = product ? uniqueProductImages(product) : ["/product-images/product-1.webp"];
   const [form, setForm] = useState<ProductFormState>(() => ({
     id: product?.id,
     sku: product?.sku ?? "",
     name: product?.name ?? "",
     nameEn: product?.nameEn ?? "",
     categoryId: product?.categoryId ?? categories[0]?.id ?? "wood",
-    image: product?.image ?? "/product-images/product-1.webp",
+    image: initialImages[0],
     price: String(product?.price ?? 0.32),
     moq: String(product?.moq ?? 200),
     material: product?.material ?? "Lotus wood",
@@ -2060,19 +2540,149 @@ function ProductEditor({
     supplier: product?.supplier ?? "",
     sourceUrl: product?.sourceUrl ?? "",
     status: product?.status ?? "active",
-    stock: String(product?.stock ?? 1000)
+    stock: String(product?.stock ?? 1000),
+    images: initialImages
   }));
+  const [selectedImageIndex, setSelectedImageIndex] = useState(0);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const imageFileInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedImage = form.images[selectedImageIndex] ?? form.images[0] ?? form.image;
 
   function update<K extends keyof ProductFormState>(key: K, value: ProductFormState[K]) {
-    setForm((current) => ({ ...current, [key]: value }));
+    setForm((current) => {
+      if (key === "image") {
+        const image = String(value);
+        const images = normalizeImageList([image, ...current.images], image);
+        return { ...current, image, images };
+      }
+      return { ...current, [key]: value };
+    });
+  }
+
+  function updateImage(index: number, value: string) {
+    setForm((current) => {
+      const images = current.images.map((image, imageIndex) => imageIndex === index ? value : image);
+      return { ...current, image: index === 0 ? value : current.image, images };
+    });
+  }
+
+  function addImage() {
+    setForm((current) => {
+      const images = [...current.images, ""];
+      setSelectedImageIndex(images.length - 1);
+      return { ...current, images };
+    });
+  }
+
+  async function uploadImage(file: File) {
+    setUploadingImage(true);
+    const body = new FormData();
+    body.append("file", file);
+    const response = await fetch("/api/admin/uploads/product-images", { method: "POST", body });
+    setUploadingImage(false);
+    const data = await response.json() as { url?: string; message?: string };
+    if (!response.ok || !data.url) {
+      window.alert(data.message ?? "图片上传失败");
+      return;
+    }
+    setForm((current) => {
+      const images = [...current.images, data.url as string];
+      setSelectedImageIndex(images.length - 1);
+      return { ...current, images };
+    });
+  }
+
+  function removeImage(index: number) {
+    setForm((current) => {
+      const images = current.images.filter((_, imageIndex) => imageIndex !== index);
+      const nextImages = images.length ? images : [current.image];
+      setSelectedImageIndex((currentIndex) => Math.min(currentIndex >= index ? Math.max(currentIndex - 1, 0) : currentIndex, nextImages.length - 1));
+      return { ...current, image: index === 0 ? nextImages[0] : current.image, images: nextImages };
+    });
+  }
+
+  function setAsMainImage(index: number) {
+    setForm((current) => {
+      const image = current.images[index];
+      if (!image) return current;
+      const images = [image, ...current.images.filter((_, imageIndex) => imageIndex !== index)];
+      setSelectedImageIndex(0);
+      return { ...current, image, images };
+    });
+  }
+
+  function moveImage(index: number, direction: -1 | 1) {
+    setForm((current) => {
+      const targetIndex = index + direction;
+      if (targetIndex < 0 || targetIndex >= current.images.length) return current;
+      const images = [...current.images];
+      [images[index], images[targetIndex]] = [images[targetIndex], images[index]];
+      setSelectedImageIndex(targetIndex);
+      return { ...current, image: images[0] ?? current.image, images };
+    });
   }
 
   return (
-    <div className="admin-modal-backdrop">
+    <AdminModalBackdrop>
       <form className="admin-product-modal" onSubmit={(event) => { event.preventDefault(); onSubmit(form); }}>
         <div className="detail-head">
           <h2>{product ? "编辑产品" : "添加产品"}</h2>
           <button type="button" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="product-images-editor">
+          <div className="product-images-head">
+            <strong>产品图片</strong>
+            <div>
+              <input
+                ref={imageFileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (file) void uploadImage(file);
+                }}
+              />
+              <button type="button" onClick={() => imageFileInputRef.current?.click()} disabled={uploadingImage}>
+                <Plus size={16} /> {uploadingImage ? "上传中..." : "添加图片"}
+              </button>
+              <button type="button" onClick={addImage}>添加路径</button>
+            </div>
+          </div>
+          <div className="product-image-manager">
+            <div className="product-image-stage">
+              <img src={selectedImage || form.image} alt={form.name || "产品图片预览"} />
+            </div>
+            <div className="product-image-controls">
+              <label>{selectedImageIndex === 0 ? "主图路径" : `图片 ${selectedImageIndex + 1} 路径`}
+                <input
+                  required={selectedImageIndex === 0}
+                  value={selectedImage}
+                  onChange={(event) => updateImage(selectedImageIndex, event.target.value)}
+                  placeholder="/product-images/example.webp"
+                />
+              </label>
+              <div>
+                <button type="button" disabled={selectedImageIndex === 0} onClick={() => setAsMainImage(selectedImageIndex)}>设为主图</button>
+                <button type="button" disabled={selectedImageIndex === 0} onClick={() => moveImage(selectedImageIndex, -1)}>前移</button>
+                <button type="button" disabled={selectedImageIndex >= form.images.length - 1} onClick={() => moveImage(selectedImageIndex, 1)}>后移</button>
+                <button type="button" disabled={form.images.length === 1} onClick={() => removeImage(selectedImageIndex)}><Trash2 size={16} /> 删除</button>
+              </div>
+            </div>
+          </div>
+          <div className="product-image-strip">
+            {form.images.map((image, index) => (
+              <button
+                className={selectedImageIndex === index ? "active" : ""}
+                type="button"
+                key={index}
+                onClick={() => setSelectedImageIndex(index)}
+              >
+                <img src={image || form.image} alt={`产品图片 ${index + 1}`} />
+                <span>{index === 0 ? "主图" : index + 1}</span>
+              </button>
+            ))}
+          </div>
         </div>
         <div className="product-form-grid">
           <label>产品名称<input required value={form.name} onChange={(event) => update("name", event.target.value)} /></label>
@@ -2094,18 +2704,17 @@ function ProductEditor({
           <label>体积 m3<input required type="number" step="0.00001" value={form.volumeM3} onChange={(event) => update("volumeM3", event.target.value)} /></label>
           <label>供应商<input value={form.supplier} onChange={(event) => update("supplier", event.target.value)} /></label>
           <label>来源链接<input value={form.sourceUrl} onChange={(event) => update("sourceUrl", event.target.value)} /></label>
-          <label className="full">图片路径<input required value={form.image} onChange={(event) => update("image", event.target.value)} /></label>
         </div>
         <div className="detail-actions">
           <button className="admin-light" type="button" onClick={onClose}>取消</button>
           <button className="admin-primary" type="submit" disabled={saving}>{saving ? "保存中..." : "保存产品"}</button>
         </div>
       </form>
-    </div>
+    </AdminModalBackdrop>
   );
 }
 
-function QuotesAdmin() {
+function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (target?: { whatsapp?: string; quoteId?: string }) => void }) {
   const [quotes, setQuotes] = useState<QuoteWithItems[]>([]);
   const [metrics, setMetrics] = useState<QuoteMetrics>({ total: 0, pending: 0, sent: 0, closed: 0, amount: 0 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -2116,7 +2725,7 @@ function QuotesAdmin() {
   const [editing, setEditing] = useState<QuoteWithItems | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useAutoDismissMessage();
   const selected = quotes.find((quote) => quote.id === selectedId) ?? quotes[0] ?? null;
   const visibleQuotes = quotes.filter((quote) => {
     const keyword = query.trim().toLowerCase();
@@ -2196,7 +2805,13 @@ function QuotesAdmin() {
       maxVolumeM3: Number(form.maxVolumeM3),
       currentWeightKg: Number(form.currentWeightKg),
       maxWeightKg: Number(form.maxWeightKg),
-      createdAt: form.createdAt
+      createdAt: form.createdAt,
+      items: form.items.map((item) => ({
+        ...item,
+        quantity: Math.max(1, Number(item.quantity || 1)),
+        unitPrice: Number(item.unitPrice || 0),
+        amount: Math.max(1, Number(item.quantity || 1)) * Number(item.unitPrice || 0)
+      }))
     };
     const isNew = !quotes.some((quote) => quote.id === editing.id);
     const response = await fetch("/api/admin/quotes", {
@@ -2275,7 +2890,6 @@ function QuotesAdmin() {
         <button className="admin-light">2026-05-01 ~ 2026-05-24 <CalendarDays size={18} /></button>
         <button className="admin-light" onClick={() => void loadQuotesFromApi()}><RefreshCw size={18} /> 刷新</button>
         <button className="admin-primary" onClick={openCreateQuote}><Plus size={18} /> 新建报价单</button>
-        <button className="admin-bell"><Bell size={20} /><span>12</span></button>
       </AdminTop>
       {message && <div className="admin-message">{message}</div>}
       <div className="admin-metrics five">
@@ -2295,6 +2909,7 @@ function QuotesAdmin() {
             <select value={containerFilter} onChange={(event) => setContainerFilter(event.target.value)}><option value="all">集装箱类型</option>{containers.map((container) => <option key={container} value={container}>{container}</option>)}</select>
             <button>导出报价单</button>
           </div>
+          <div className="admin-table-scroll">
           <table className="admin-table quote-table">
             <thead><tr><th>报价单编号</th><th>客户名称</th><th>国家/地区</th><th>联系方式</th><th>产品数量</th><th>集装箱类型</th><th>产品金额</th><th>海运费用</th><th>报价总额</th><th>状态</th><th>提交时间</th><th>操作</th></tr></thead>
             <tbody>
@@ -2305,7 +2920,18 @@ function QuotesAdmin() {
                   <td>{quote.quoteNo}</td>
                   <td>{quote.company}</td>
                   <td>{countryFlag(quote.country)} {quote.country}</td>
-                  <td>🟢</td>
+                  <td>
+                    <button
+                      className="quote-contact-button"
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onOpenConversation({ whatsapp: quote.whatsapp, quoteId: quote.id });
+                      }}
+                    >
+                      <MessageCircle size={15} /> {quote.whatsapp || "未留 WhatsApp"}
+                    </button>
+                  </td>
                   <td>{quote.productCount} 种产品</td>
                   <td>{quote.containerType}</td>
                   <td>{usd.format(quote.productAmount)}</td>
@@ -2326,6 +2952,7 @@ function QuotesAdmin() {
               ))}
             </tbody>
           </table>
+          </div>
           <PaginationFooter
             total={visibleQuotes.length}
             page={pagination.page}
@@ -2335,14 +2962,60 @@ function QuotesAdmin() {
             onPageSizeChange={pagination.setPageSize}
           />
         </section>
-        {selected && <QuoteDetail quote={selected} />}
+        {selected && <QuoteDetail quote={selected} onChanged={loadQuotesFromApi} onMessage={setMessage} />}
       </div>
       {editing && <QuoteEditorModal quote={editing} saving={saving} onClose={() => setEditing(null)} onSubmit={saveQuote} />}
     </>
   );
 }
 
-function QuoteDetail({ quote }: { quote: QuoteWithItems }) {
+function QuoteDetail({ quote, onChanged, onMessage }: { quote: QuoteWithItems; onChanged: () => Promise<void>; onMessage: (message: string) => void }) {
+  const [documentId, setDocumentId] = useState<string | null>(null);
+
+  async function generatePdf() {
+    const response = await fetch(`/api/admin/quotes/${encodeURIComponent(quote.id)}/pdf`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "quote_pdf" })
+    });
+    if (!response.ok) {
+      onMessage("生成报价文件失败");
+      return;
+    }
+    const data = await response.json() as { document: { id: string } };
+    setDocumentId(data.document.id);
+    onMessage("报价文件已生成");
+    window.open(`/api/storefront/documents/${data.document.id}`, "_blank");
+  }
+
+  async function sendQuote() {
+    const response = await fetch(`/api/admin/quotes/${encodeURIComponent(quote.id)}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ documentId })
+    });
+    if (!response.ok) {
+      onMessage("发送记录创建失败");
+      return;
+    }
+    const data = await response.json() as { record: { accessUrl: string | null; status: string; error?: string | null } };
+    onMessage(data.record.status === "sent" ? "报价单已通过 WhatsApp 发送" : `已生成 WhatsApp 发送记录：${data.record.accessUrl ?? data.record.error ?? ""}`);
+    await onChanged();
+  }
+
+  async function closeWon() {
+    const response = await fetch(`/api/admin/quotes/${encodeURIComponent(quote.id)}/close-won`, { method: "POST" });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({})) as { message?: string };
+      onMessage(data.message ?? "转为成交失败");
+      return;
+    }
+    const data = await response.json() as { document: { id: string }; record: { status: string; accessUrl: string | null } };
+    window.open(`/api/storefront/documents/${data.document.id}`, "_blank");
+    onMessage(data.record.status === "sent" ? "成交回执已生成并发送" : "成交回执已生成，请手动 WhatsApp 发送");
+    await onChanged();
+  }
+
   return (
     <aside className="admin-detail quote-detail">
       <div className="detail-head"><h2>报价单详情</h2><X size={18} /></div>
@@ -2378,9 +3051,9 @@ function QuoteDetail({ quote }: { quote: QuoteWithItems }) {
         <table className="mini-items-table"><tbody>{quote.items.slice(0, 3).map((item) => <tr key={item.id}><td>{item.name}</td><td>{item.sku}</td><td>{item.quantity}</td><td>{usd.format(item.amount)}</td></tr>)}</tbody></table>
       </DetailSection>
       <div className="quote-detail-actions">
-        <button className="admin-light">生成报价单PDF</button>
-        <button className="whatsapp">WhatsApp联系客户</button>
-        <button className="admin-primary">转为成交订单</button>
+        <button className="admin-light" onClick={() => void generatePdf()}>生成报价单PDF</button>
+        <button className="whatsapp" onClick={() => void sendQuote()}>WhatsApp联系客户</button>
+        <button className="admin-primary" onClick={() => void closeWon()}>转为成交订单</button>
       </div>
     </aside>
   );
@@ -2423,16 +3096,39 @@ function QuoteEditorModal({
     maxVolumeM3: String(quote.maxVolumeM3),
     currentWeightKg: String(quote.currentWeightKg),
     maxWeightKg: String(quote.maxWeightKg),
-    createdAt: quote.createdAt
+    createdAt: quote.createdAt,
+    items: quote.items
   }));
-  const total = Number(form.productAmount) + Number(form.shippingFee) + Number(form.localFee) + Number(form.documentFee) + Number(form.customsFee) + Number(form.insuranceFee);
+  const itemTotal = form.items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unitPrice || 0), 0);
+  const productAmount = Number(form.productAmount || itemTotal);
+  const total = productAmount + Number(form.shippingFee) + Number(form.localFee) + Number(form.documentFee) + Number(form.customsFee) + Number(form.insuranceFee);
 
   function update<K extends keyof QuoteFormState>(key: K, value: QuoteFormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
   }
 
+  function updateItem(index: number, patch: Partial<QuoteLineItem>) {
+    setForm((current) => {
+      const items = current.items.map((item, itemIndex) => {
+        if (itemIndex !== index) return item;
+        const next = { ...item, ...patch };
+        const quantity = Math.max(1, Number(next.quantity || 1));
+        const unitPrice = Number(next.unitPrice || 0);
+        return { ...next, quantity, unitPrice, amount: quantity * unitPrice };
+      });
+      return { ...current, items, productAmount: String(items.reduce((sum, item) => sum + item.amount, 0)) };
+    });
+  }
+
+  function removeItem(index: number) {
+    setForm((current) => {
+      const items = current.items.filter((_, itemIndex) => itemIndex !== index);
+      return { ...current, items, productAmount: String(items.reduce((sum, item) => sum + item.amount, 0)) };
+    });
+  }
+
   return (
-    <div className="admin-modal-backdrop">
+    <AdminModalBackdrop>
       <form className="admin-quote-modal quote-detail-modal" onSubmit={(event) => { event.preventDefault(); void onSubmit(form); }}>
         <div className="quote-modal-head">
           <div>
@@ -2478,8 +3174,23 @@ function QuoteEditorModal({
             </div>
           </section>
           <section className="quote-modal-card">
-            <h3>4. 产品明细（部分）</h3>
-            <table className="mini-items-table"><thead><tr><th>商品</th><th>SKU</th><th>数量</th><th>单价</th><th>小计</th></tr></thead><tbody>{quote.items.slice(0, 4).map((item) => <tr key={item.id}><td>{item.name}</td><td>{item.sku}</td><td>{item.quantity}</td><td>{usd.format(item.unitPrice)}</td><td>{usd.format(item.amount)}</td></tr>)}</tbody></table>
+            <h3>4. 产品明细</h3>
+            <table className="mini-items-table quote-items-editor">
+              <thead><tr><th>商品</th><th>SKU</th><th>数量</th><th>单价</th><th>小计</th><th>操作</th></tr></thead>
+              <tbody>
+                {form.items.map((item, index) => (
+                  <tr key={item.id}>
+                    <td><input value={item.name} onChange={(event) => updateItem(index, { name: event.target.value })} /></td>
+                    <td><input value={item.sku} onChange={(event) => updateItem(index, { sku: event.target.value })} /></td>
+                    <td><input type="number" min="1" value={item.quantity} onChange={(event) => updateItem(index, { quantity: Number(event.target.value) })} /></td>
+                    <td><input type="number" step="0.01" value={item.unitPrice} onChange={(event) => updateItem(index, { unitPrice: Number(event.target.value) })} /></td>
+                    <td>{usd.format(item.amount)}</td>
+                    <td><button type="button" onClick={() => removeItem(index)}>删除</button></td>
+                  </tr>
+                ))}
+                {form.items.length === 0 && <tr><td colSpan={6}>暂无产品明细。</td></tr>}
+              </tbody>
+            </table>
           </section>
           <section className="quote-modal-card quote-feedback-card">
             <h3>5. 反馈信息</h3>
@@ -2517,7 +3228,7 @@ function QuoteEditorModal({
           <button className="whatsapp" type="button">WhatsApp联系客户</button>
         </div>
       </form>
-    </div>
+    </AdminModalBackdrop>
   );
 }
 
@@ -2545,7 +3256,7 @@ function CustomersAdmin() {
   const [editing, setEditing] = useState<CustomerWithStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useAutoDismissMessage();
   const selected = customers.find((customer) => customer.id === selectedId) ?? customers[0] ?? null;
   const countries = Array.from(new Set(customers.map((customer) => customer.country)));
   const visibleCustomers = customers.filter((customer) => {
@@ -2650,6 +3361,7 @@ function CustomersAdmin() {
             <button onClick={resetFilters}><RefreshCw size={16} /> 重置</button>
             <button><Download size={16} /> 导出</button>
           </div>
+          <div className="admin-table-scroll">
           <table className="admin-table customer-table">
             <thead><tr><th>客户名称</th><th>国家/地区</th><th>联系人</th><th>WhatsApp</th><th>邮箱</th><th>客户分组</th><th>客户状态</th><th>累计报价单</th><th>成交金额</th><th>最后跟进时间</th><th>操作</th></tr></thead>
             <tbody>
@@ -2676,6 +3388,7 @@ function CustomersAdmin() {
               ))}
             </tbody>
           </table>
+          </div>
           <PaginationFooter
             total={visibleCustomers.length}
             page={pagination.page}
@@ -2779,7 +3492,7 @@ function CustomerEditorModal({
   }
 
   return (
-    <div className="admin-modal-backdrop">
+    <AdminModalBackdrop>
       <form className="admin-category-modal" onSubmit={(event) => { event.preventDefault(); void onSubmit(form); }}>
         <div className="detail-head">
           <h2>{customer.id ? "编辑客户" : "新增客户"}</h2>
@@ -2803,7 +3516,7 @@ function CustomerEditorModal({
           <button className="admin-primary" type="submit" disabled={saving}>{saving ? "保存中..." : "保存"}</button>
         </div>
       </form>
-    </div>
+    </AdminModalBackdrop>
   );
 }
 
@@ -2844,7 +3557,7 @@ function FollowupsAdmin() {
   const [editing, setEditing] = useState<FollowupRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useAutoDismissMessage();
   const owners = Array.from(new Set(followups.map((item) => item.owner))).filter(Boolean);
   const selected = followups.find((item) => item.id === selectedId) ?? followups[0] ?? null;
   const visibleFollowups = followups.filter((item) => {
@@ -2979,6 +3692,7 @@ function FollowupsAdmin() {
             <button onClick={resetFilters}><RefreshCw size={16} /> 重置</button>
             <button><Download size={16} /> 导出</button>
           </div>
+          <div className="admin-table-scroll">
           <table className="admin-table followup-table">
             <thead><tr><th>客户信息</th><th>跟进内容</th><th>跟进类型</th><th>跟进状态</th><th>下次跟进时间</th><th>跟进人</th><th>跟进时间</th><th>操作</th></tr></thead>
             <tbody>
@@ -3007,6 +3721,7 @@ function FollowupsAdmin() {
               ))}
             </tbody>
           </table>
+          </div>
           <PaginationFooter
             total={visibleFollowups.length}
             page={pagination.page}
@@ -3110,7 +3825,7 @@ function FollowupEditorModal({
   }
 
   return (
-    <div className="admin-modal-backdrop">
+    <AdminModalBackdrop>
       <form className="admin-quote-modal quote-detail-modal followup-modal" onSubmit={(event) => { event.preventDefault(); void onSubmit(form); }}>
         <div className="quote-modal-head">
           <div>
@@ -3146,7 +3861,7 @@ function FollowupEditorModal({
           <button className="admin-primary" type="submit" disabled={saving}>{saving ? "保存中..." : "保存记录"}</button>
         </div>
       </form>
-    </div>
+    </AdminModalBackdrop>
   );
 }
 
@@ -3203,7 +3918,7 @@ function SuppliersAdmin() {
   const [editing, setEditing] = useState<Supplier | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useAutoDismissMessage();
   const regions = Array.from(new Set(suppliers.map((supplier) => supplier.region))).filter(Boolean);
   const selected = suppliers.find((supplier) => supplier.id === selectedId) ?? suppliers[0] ?? null;
   const visibleSuppliers = suppliers.filter((supplier) => {
@@ -3319,6 +4034,7 @@ function SuppliersAdmin() {
       </div>
       <div className="supplier-admin-grid">
         <section className="admin-panel supplier-list-panel">
+          <div className="admin-table-scroll">
           <table className="admin-table supplier-table">
             <thead><tr><th>供应商信息</th><th>主营产品</th><th>产品信息</th><th>1688店铺信息</th><th>服务数据</th><th>操作</th></tr></thead>
             <tbody>
@@ -3350,6 +4066,7 @@ function SuppliersAdmin() {
               ))}
             </tbody>
           </table>
+          </div>
           <PaginationFooter
             total={visibleSuppliers.length}
             page={pagination.page}
@@ -3463,7 +4180,7 @@ function SupplierEditorModal({
   }
 
   return (
-    <div className="admin-modal-backdrop">
+    <AdminModalBackdrop>
       <form className="admin-quote-modal quote-detail-modal supplier-modal" onSubmit={(event) => { event.preventDefault(); void onSubmit(form); }}>
         <div className="quote-modal-head">
           <div>
@@ -3517,7 +4234,7 @@ function SupplierEditorModal({
           <button className="admin-primary" type="submit" disabled={saving}>{saving ? "保存中..." : "保存供应商"}</button>
         </div>
       </form>
-    </div>
+    </AdminModalBackdrop>
   );
 }
 

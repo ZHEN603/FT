@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(psql \"postgresql://ft_user:ft_password@localhost:5432/ft_dev\" -c \"SELECT id, name, parent_id, level FROM categories ORDER BY level, sort_order, name;\")",
+      "Read(//Applications/Postgres.app/Contents/Versions/latest/bin/**)",
+      "Read(//usr/local/**)",
+      "Read(//opt/**)",
+      "Bash(docker exec *)"
+    ]
+  }
+}
