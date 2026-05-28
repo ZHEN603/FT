@@ -1,8 +1,14 @@
 import { NextResponse } from "next/server";
-import { createQuote, deleteQuote, listQuotesFromDb, updateQuote } from "@/lib/db";
+import { createQuote, deleteQuote, listQuotesByCustomer, listQuotesFromDb, updateQuote } from "@/lib/db";
 import type { QuoteInput } from "@/lib/db";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const customerId = searchParams.get("customerId");
+  if (customerId) {
+    const quotes = await listQuotesByCustomer(customerId);
+    return NextResponse.json({ quotes });
+  }
   const quotes = await listQuotesFromDb();
   return NextResponse.json({
     quotes,

@@ -67,7 +67,7 @@ type StorefrontState = { sessionId: string; saved: string[]; cart: CartItem[] };
 type InquiryReceipt = { id: string; title: string; version: number };
 type InquiryAccess = { accessUrl: string; expiresAt: string };
 type InquiryAdvisor = { name: string; whatsapp: string };
-type ViewMode = "home" | "catalog" | "container" | "comingSoon";
+type ViewMode = "home" | "catalog" | "container" | "comingSoon" | "contact";
 type SortMode = "default" | "priceAsc" | "priceDesc" | "skuDesc";
 
 const fallbackCatalog = catalogData as Catalog;
@@ -162,9 +162,8 @@ export default function StorefrontPage() {
   const [containerType, setContainerType] = useState("40GP");
   const [sessionId, setSessionId] = useState("");
   const [stateReady, setStateReady] = useState(false);
-  const [showChat, setShowChat] = useState(false);
   const [chatMessage, setChatMessage] = useState("");
-  const modalOpen = Boolean(selectedProduct || showQuote || showChat || submittedQuote);
+  const modalOpen = Boolean(selectedProduct || showQuote || submittedQuote);
 
   useEffect(() => {
     let cancelled = false;
@@ -291,6 +290,11 @@ export default function StorefrontPage() {
     setView("comingSoon");
   }
 
+  function openContact() {
+    setSubmitError("");
+    setView("contact");
+  }
+
   function toggleSaved(offerId: string) {
     setSaved((current) => {
       const next = new Set(current);
@@ -415,7 +419,7 @@ export default function StorefrontPage() {
       return;
     }
     setChatMessage("");
-    setShowChat(false);
+    setSubmitError("消息已发送，业务顾问会尽快联系您。");
   }
 
   return (
@@ -430,7 +434,7 @@ export default function StorefrontPage() {
           <button onClick={() => openComingSoon("定制服务")}>定制服务</button>
           <button onClick={() => openComingSoon("关于我们")}>关于我们</button>
           <button onClick={() => openComingSoon("资源")}>资源</button>
-          <button onClick={() => openComingSoon("联系我们")}>联系我们</button>
+          <button onClick={openContact}>联系我们</button>
         </nav>
         <label className="ft-search"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") openCatalog(category); }} placeholder="搜索商品、SKU、Offer ID" /></label>
         <button className="ft-red-btn" onClick={() => openCatalog(category)}>搜索</button>
@@ -484,6 +488,16 @@ export default function StorefrontPage() {
           {view === "comingSoon" && (
             <ComingSoonView title={comingSoonTitle || "敬请期待"} onHome={() => setView("home")} onCatalog={() => openCatalog("all")} />
           )}
+          {view === "contact" && (
+            <ContactView
+              sessionId={sessionId}
+              message={chatMessage}
+              submitError={submitError}
+              onMessage={setChatMessage}
+              onHome={() => setView("home")}
+              onSubmit={submitChat}
+            />
+          )}
           {false && view === "container" && (
             <ContainerView
               cartRows={cartRows}
@@ -498,11 +512,13 @@ export default function StorefrontPage() {
         </section>
       </div>
 
-      <div className="ft-floating">
-        {/* 集装箱页入口 Phase1 暂时隐藏，保留代码。 */}
-        {false && <button className="ft-outline" onClick={() => setView(view === "container" ? "catalog" : "container")}>{view === "container" ? "返回产品" : "查看我的集装箱"}</button>}
-        <button className="ft-red-btn" onClick={() => setShowQuote(true)}><Send size={18} /> 提交询价</button>
-      </div>
+      {view !== "contact" && (
+        <div className="ft-floating">
+          {/* 集装箱页入口 Phase1 暂时隐藏，保留代码。 */}
+          {false && <button className="ft-outline" onClick={() => setView(view === "container" ? "catalog" : "container")}>{view === "container" ? "返回产品" : "查看我的集装箱"}</button>}
+          <button className="ft-red-btn" onClick={() => setShowQuote(true)}><Send size={18} /> 提交询价</button>
+        </div>
+      )}
 
       {selectedProduct && <ProductSpecModal product={selectedProduct} saved={saved.has(selectedProduct.offerId)} onClose={() => setSelectedProduct(null)} onAdd={addToCart} onSave={toggleSaved} />}
       {showQuote && (
@@ -516,7 +532,6 @@ export default function StorefrontPage() {
           onSubmit={submitQuote}
         />
       )}
-      {showChat && <ChatModal sessionId={sessionId} message={chatMessage} submitError={submitError} onMessage={setChatMessage} onClose={() => setShowChat(false)} onSubmit={submitChat} />}
       {submittedQuote && (
         <SuccessModal
           quote={submittedQuote}
@@ -526,7 +541,6 @@ export default function StorefrontPage() {
           onClose={() => setSubmittedQuote(null)}
         />
       )}
-      <button className="ft-chat-button" onClick={() => setShowChat(true)}>沟通中心</button>
     </main>
   );
 }
@@ -894,38 +908,56 @@ function InquiryModal({ cartRows, totals, submitError, onClose, onQuantity, onRe
   );
 }
 
-function ChatModal({ sessionId, message, submitError, onMessage, onClose, onSubmit }: {
+function ContactView({ sessionId, message, submitError, onMessage, onHome, onSubmit }: {
   sessionId: string;
   message: string;
   submitError: string;
   onMessage: (value: string) => void;
-  onClose: () => void;
+  onHome: () => void;
   onSubmit: (formData: FormData) => void | Promise<void>;
 }) {
   return (
-    <div className="ft-modal-backdrop">
-      <form className="ft-chat-modal" action={onSubmit}>
-        <button className="ft-modal-close" type="button" onClick={onClose}><X size={22} /></button>
-        <h2>沟通中心</h2>
-        <p>留下 WhatsApp 和需求，消息会同步到后台跟进记录。</p>
-        <input type="hidden" name="sessionId" value={sessionId} />
-        <div className="chat-window">
-          <div className="agent"><strong>客户经理</strong><span>你好，请告诉我你想采购的产品、数量、目的港或预算。</span></div>
-          {message && <div className="visitor"><strong>我</strong><span>{message}</span></div>}
-        </div>
-        <div className="form-grid">
-          <label>姓名<input name="name" placeholder="Lucas Brown" /></label>
-          <label>公司名称<input name="company" placeholder="Global Retail Inc." /></label>
-          <label>WhatsApp *<input name="whatsapp" required placeholder="+1 310 555 0188" /></label>
-          <label>邮箱<input name="email" placeholder="lucas@globalretail.com" /></label>
-          <label>国家 / 地区<input name="country" defaultValue="United States" /></label>
-          <label>目的港<input name="port" placeholder="Los Angeles" /></label>
-          <label className="full">消息内容 *<textarea name="message" required value={message} onChange={(event) => onMessage(event.target.value)} placeholder="我想询问这些衣架的 MOQ、包装和到港价格..." /></label>
-        </div>
-        {submitError && <div className="ft-api-message">{submitError}</div>}
-        <div className="modal-actions"><button className="ft-outline" type="button" onClick={onClose}>取消</button><button className="ft-red-btn" type="submit">发送到后台跟进</button></div>
-      </form>
-    </div>
+    <section className="ft-contact-page">
+      <nav className="ft-breadcrumb" aria-label="页面导航">
+        <button type="button" onClick={onHome}>首页</button>
+        <span aria-hidden="true">›</span>
+        <strong aria-current="page">联系我们</strong>
+      </nav>
+      <div className="ft-contact-shell">
+        <section className="ft-contact-intro">
+          <span>Contact</span>
+          <h2>联系我们</h2>
+          <p>留下 WhatsApp 和采购需求，消息会同步到后台跟进记录，业务顾问会根据产品、数量、包装和目的港确认报价。</p>
+          <div className="ft-contact-points">
+            <div><strong>报价确认</strong><small>MOQ、包装、Logo、交期</small></div>
+            <div><strong>物流估算</strong><small>目的港、柜型、到港费用</small></div>
+            <div><strong>后台跟进</strong><small>消息进入客户沟通中心</small></div>
+          </div>
+          <div className="chat-window ft-contact-chat">
+            <div className="agent"><strong>客户经理</strong><span>你好，请告诉我你想采购的产品、数量、目的港或预算。</span></div>
+            {message && <div className="visitor"><strong>我</strong><span>{message}</span></div>}
+          </div>
+        </section>
+        <form className="ft-contact-panel" action={onSubmit}>
+          <input type="hidden" name="sessionId" value={sessionId} />
+          <div className="ft-contact-form-head">
+            <h3>发送采购需求</h3>
+            <p>带 * 的字段为必填。</p>
+          </div>
+          <div className="ft-contact-form-grid">
+            <label>姓名<input name="name" placeholder="Lucas Brown" /></label>
+            <label>公司名称<input name="company" placeholder="Global Retail Inc." /></label>
+            <label>WhatsApp *<input name="whatsapp" required placeholder="+1 310 555 0188" /></label>
+            <label>邮箱<input name="email" placeholder="lucas@globalretail.com" /></label>
+            <label>国家 / 地区<input name="country" defaultValue="United States" /></label>
+            <label>目的港<input name="port" placeholder="Los Angeles" /></label>
+            <label className="full">消息内容 *<textarea name="message" required value={message} onChange={(event) => onMessage(event.target.value)} placeholder="我想询问这些衣架的 MOQ、包装和到港价格..." /></label>
+          </div>
+          {submitError && <div className="ft-api-message">{submitError}</div>}
+          <div className="ft-contact-actions"><button className="ft-red-btn" type="submit">发送到后台跟进</button></div>
+        </form>
+      </div>
+    </section>
   );
 }
 
@@ -942,15 +974,33 @@ function SuccessModal({
   advisor: InquiryAdvisor;
   onClose: () => void;
 }) {
+  const [copyNotice, setCopyNotice] = useState("");
   const whatsappText = `Hello, I submitted inquiry ${quote.id}. Please help confirm product quotation.`;
   const whatsappUrl = `https://wa.me/${advisor.whatsapp.replace(/[^\d]/g, "")}?text=${encodeURIComponent(whatsappText)}`;
-  function copyAdvisor() {
-    void navigator.clipboard?.writeText(advisor.whatsapp);
+
+  useEffect(() => {
+    if (!copyNotice) return;
+    const timer = window.setTimeout(() => setCopyNotice(""), 3000);
+    return () => window.clearTimeout(timer);
+  }, [copyNotice]);
+
+  async function copyAdvisor() {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API is not available.");
+      }
+      await navigator.clipboard.writeText(advisor.whatsapp);
+      setCopyNotice("号码已复制");
+    } catch {
+      setCopyNotice("复制失败，请手动复制");
+    }
   }
+
   return (
     <div className="ft-modal-backdrop">
       <div className="ft-success-modal inquiry-success-modal">
         <button className="ft-modal-close" type="button" onClick={onClose}><X size={22} /></button>
+        {copyNotice && <div className="ft-copy-toast">{copyNotice}</div>}
         <h2>提交询价</h2>
         <div className="success-banner">
           <CheckCircle2 size={46} />

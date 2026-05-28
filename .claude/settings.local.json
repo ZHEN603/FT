@@ -6,7 +6,21 @@
       "Read(//Applications/Postgres.app/Contents/Versions/latest/bin/**)",
       "Read(//usr/local/**)",
       "Read(//opt/**)",
-      "Bash(docker exec *)"
+      "Bash(docker exec *)",
+      "Bash(xxd)",
+      "Bash(mkdir -p /Users/zhen/Projects/FT/src/app/api/admin/quotes/\\\\[id\\\\]/items/\\\\[itemId\\\\] /Users/zhen/Projects/FT/src/app/api/admin/quotes/\\\\[id\\\\]/snapshots/\\\\[snapshotId\\\\]/restore /Users/zhen/Projects/FT/src/app/api/admin/customers/\\\\[id\\\\])",
+      "Bash(npm run *)",
+      "Bash(mkdir -p /Users/zhen/Projects/FT/src/app/api/admin/conversations/\\\\[id\\\\]/convert /Users/zhen/Projects/FT/src/app/api/admin/conversations/\\\\[id\\\\]/quote)",
+      "Bash(npx next *)",
+      "Bash(sed -n '745,755p' /Users/zhen/Projects/FT/src/app/globals.css)",
+      "Bash(sed -n '1718,1722p' /Users/zhen/Projects/FT/src/app/globals.css)",
+      "Bash(sed -n '2876,2880p' /Users/zhen/Projects/FT/src/app/globals.css)",
+      "Bash(sed -n '5200,5210p' /Users/zhen/Projects/FT/src/app/globals.css)",
+      "Bash(sed -n '5663,5690p' /Users/zhen/Projects/FT/src/app/globals.css)"
+    ],
+    "additionalDirectories": [
+      "/Users/zhen/Projects/FT/src/app/api/admin/quotes/[id]/items",
+      "/Users/zhen/Projects/FT/src/app/api/admin/conversations/[id]"
     ]
   }
 }

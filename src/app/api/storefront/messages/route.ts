@@ -7,6 +7,6 @@ export async function POST(request: Request) {
   if (!input.whatsapp || !input.message?.trim()) {
     return NextResponse.json({ message: "缺少 WhatsApp 或沟通内容" }, { status: 400 });
   }
-  const followup = await createStorefrontMessage(input);
-  return NextResponse.json({ followup }, { status: 201 });
+  const result = await createStorefrontMessage(input);
+  return NextResponse.json(result, { status: 201 });
 }
