@@ -16,7 +16,18 @@
       "Bash(sed -n '1718,1722p' /Users/zhen/Projects/FT/src/app/globals.css)",
       "Bash(sed -n '2876,2880p' /Users/zhen/Projects/FT/src/app/globals.css)",
       "Bash(sed -n '5200,5210p' /Users/zhen/Projects/FT/src/app/globals.css)",
-      "Bash(sed -n '5663,5690p' /Users/zhen/Projects/FT/src/app/globals.css)"
+      "Bash(sed -n '5663,5690p' /Users/zhen/Projects/FT/src/app/globals.css)",
+      "Bash(cat)",
+      "Bash(bash /tmp/find_structure.sh)",
+      "Bash(awk 'NR>=10050 && NR<=10060' /Users/zhen/Projects/FT/src/app/globals.css)",
+      "Bash(grep -n \"^button,\\\\|^button {\" /Users/zhen/Projects/FT/src/app/globals.css)",
+      "Bash(awk 'NR>=9940 && NR<=9990' /Users/zhen/Projects/FT/src/app/globals.css)",
+      "Bash(awk '/^\\\\.admin-primary,/{found=1} found{print NR\": \"$0} found && /^}$/{exit}' /Users/zhen/Projects/FT/src/app/globals.css)",
+      "Bash(npm install *)",
+      "Bash(node -e \"require\\('xlsx'\\); console.log\\('OK'\\)\")",
+      "Bash(curl -s -X POST http://localhost:3000/api/admin/products/import -H 'Content-Type: application/json' -d '{\"rows\":[{\"sku\":\"TEST001\",\"name\":\"测试产品\"}]}')",
+      "Bash(curl -v -X POST http://localhost:3000/api/admin/products/import -H 'Content-Type: application/json' -d '{\"rows\":[{\"sku\":\"TEST001\",\"name\":\"测试产品\"}]}')",
+      "Bash(curl -s -w '\\\\n%{http_code}' -X POST http://localhost:3000/api/admin/products/import -H 'Content-Type: application/json' -d '{\"rows\":[{\"sku\":\"IMPORT001\",\"name\":\"测试导入产品\",\"nameEn\":\"Test\"}]}')"
     ],
     "additionalDirectories": [
       "/Users/zhen/Projects/FT/src/app/api/admin/quotes/[id]/items",

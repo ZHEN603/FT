@@ -183,10 +183,9 @@ export function AdminSidebar({
       icon: Package,
       label: "产品管理",
       children: [
-        { id: "category", label: "产品分类" },
-        { id: "list", label: "产品列表" },
-        { id: "collection", label: "产品采集" },
-        { id: "markup", label: "加价管理" }
+        { id: "catalog", label: "产品目录" },
+        { id: "categories", label: "分类管理" },
+        { id: "collection", label: "产品采集" }
       ]
     },
     { id: "quotes", icon: ReceiptText, label: "报价单管理" },

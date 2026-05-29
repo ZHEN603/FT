@@ -2,19 +2,14 @@
 
 import { Box, Edit3, MessageCircle, Search } from "lucide-react";
 import { useState } from "react";
+import { convertCurrency, formatCurrencyAmount, type AdminCurrency } from "../shared/currency";
 import { countryFlag } from "../shared/utils";
-import { usd } from "@/components/shared";
+import { QUOTE_STATUS_META } from "./status";
 import type { Quote } from "@/lib/types";
 import type { ReactNode } from "react";
 import type { QuoteWithItems } from "./types";
 
-export const KANBAN_STATUSES: Array<{ key: Quote["status"]; label: string; color: string }> = [
-  { key: "新询价", label: "新询价", color: "#3b82f6" },
-  { key: "跟进中", label: "跟进中", color: "#f97316" },
-  { key: "已报价", label: "已报价", color: "#8b5cf6" },
-  { key: "已成交", label: "已成交", color: "#10b981" },
-  { key: "已关闭", label: "已关闭", color: "#94a3b8" },
-];
+export const KANBAN_STATUSES = QUOTE_STATUS_META;
 
 export function QuoteKanbanBoard({
   quotes,
@@ -25,6 +20,8 @@ export function QuoteKanbanBoard({
   onEdit,
   onChat,
   toolbarSlot,
+  displayCurrency,
+  rateMap
 }: {
   quotes: QuoteWithItems[];
   loading: boolean;
@@ -34,6 +31,8 @@ export function QuoteKanbanBoard({
   onEdit: (quote: QuoteWithItems) => void;
   onChat: (quote: QuoteWithItems) => void;
   toolbarSlot?: ReactNode;
+  displayCurrency: AdminCurrency;
+  rateMap: Map<string, number>;
 }) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<Quote["status"] | null>(null);
@@ -76,8 +75,8 @@ export function QuoteKanbanBoard({
   return (
     <div className="kanban-wrap">
       <div className="kanban-search">
-        <label><Search size={16} /><input value={query} onChange={(e) => onQueryChange(e.target.value)} placeholder="搜索客户 / 报价单编号" /></label>
         {toolbarSlot}
+        <label><Search size={16} /><input value={query} onChange={(e) => onQueryChange(e.target.value)} placeholder="搜索客户 / 报价单编号" /></label>
       </div>
       {loading ? (
         <div className="kanban-loading">加载中...</div>
@@ -118,7 +117,7 @@ export function QuoteKanbanBoard({
                       <div className="kanban-card-country">{countryFlag(quote.country)} {quote.country} · {quote.containerType}</div>
                       <div className="kanban-card-meta">
                         <span><Box size={12} /> {quote.productCount} 种产品</span>
-                        <span className="kanban-card-amount"><strong>{usd.format(quote.totalAmount)}</strong></span>
+                        <span className="kanban-card-amount"><strong>{formatCurrencyAmount(convertCurrency(quote.totalAmount, quote.currency ?? "USD", displayCurrency, rateMap), displayCurrency)}</strong></span>
                       </div>
                       <div className="kanban-card-foot">
                         <button className="kanban-card-chat" onClick={() => onChat(quote)}>

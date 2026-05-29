@@ -2,9 +2,8 @@
 
 import { AdminTop } from "../shared/AdminTop";
 import { tabLabel } from "../shared/utils";
-import { ProductListAdmin } from "./ProductListAdmin";
-import { MarkupManagementAdmin } from "../markups/MarkupManagementAdmin";
 import { ProductCategoriesAdmin } from "../categories/ProductCategoriesAdmin";
+import { ProductCatalogAdmin } from "./ProductCatalogAdmin";
 
 function ComingSoon({ title }: { title: string }) {
   return (
@@ -18,14 +17,11 @@ function ComingSoon({ title }: { title: string }) {
 }
 
 export function ProductsAdmin({ tab }: { tab: string }) {
-  if (tab === "category") {
+  if (tab === "categories") {
     return <ProductCategoriesAdmin />;
   }
-  if (tab === "markup") {
-    return <MarkupManagementAdmin />;
-  }
-  if (tab && tab !== "list") {
+  if (tab && tab !== "catalog") {
     return <ComingSoon title={tabLabel(tab) || "产品管理"} />;
   }
-  return <ProductListAdmin />;
+  return <ProductCatalogAdmin />;
 }

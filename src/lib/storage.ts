@@ -1,21 +1,17 @@
 "use client";
 
-import { initialQuotes } from "./mock-data";
 import type { Quote } from "./types";
 
 const QUOTES_KEY = "ft-mvp-quotes";
 
 export function loadQuotes(): Quote[] {
-  if (typeof window === "undefined") return initialQuotes;
+  if (typeof window === "undefined") return [];
   const raw = window.localStorage.getItem(QUOTES_KEY);
-  if (!raw) {
-    window.localStorage.setItem(QUOTES_KEY, JSON.stringify(initialQuotes));
-    return initialQuotes;
-  }
+  if (!raw) return [];
   try {
     return JSON.parse(raw) as Quote[];
   } catch {
-    return initialQuotes;
+    return [];
   }
 }
 

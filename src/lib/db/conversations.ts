@@ -1,10 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { getPool, initDb, formatDbDateTime } from "./init";
+import { inferRegionFromPhone } from "@/lib/phone-region";
+import { translateAdminMessageForCustomer, translateCustomerMessageForAdmin } from "@/lib/translation";
 import { sendWhatsAppText } from "@/lib/whatsapp";
+import { createSystemFollowup } from "./followups";
 import type {
   Conversation,
   ConversationMessage,
+  ConversationQuoteLineInput,
   CustomerWithStats,
+  PriceMarkupType,
+  SupportedCurrency,
 } from "./types";
 
 // ─── Helper mappers ───────────────────────────────────────────────────────────
@@ -44,13 +50,87 @@ function mapConversationMessageRow(row: Record<string, unknown>): ConversationMe
 
 async function getConversationContact(conversationId: string) {
   const result = await getPool().query<{ whatsapp: string }>(
-    `SELECT c.whatsapp
+    `SELECT COALESCE(c.whatsapp, cv.contact_whatsapp) AS whatsapp
      FROM conversations cv
-     JOIN customers c ON c.id = cv.customer_id
+     LEFT JOIN customers c ON c.id = cv.customer_id
      WHERE cv.id = $1`,
     [conversationId]
   );
   return result.rows[0] ?? null;
+}
+
+const FALLBACK_CNY_RATES: Record<SupportedCurrency, number> = {
+  CNY: 1,
+  USD: 1 / 7.24,
+  EUR: 1 / 7.85,
+  GBP: 1 / 9.15,
+  JPY: 1 / 0.049,
+  AUD: 1 / 4.75,
+  CAD: 1 / 5.28
+};
+
+function applyConversationMarkup(price: number, value: number, type: PriceMarkupType) {
+  const base = Number(price || 0);
+  if (value <= 0) return Number(base.toFixed(4));
+  return Number((type === "fixed" ? base + value : base * (1 + value / 100)).toFixed(4));
+}
+
+async function getConversationExchangeRate(from: SupportedCurrency, to: SupportedCurrency): Promise<number> {
+  if (from === to) return 1;
+  const direct = await getPool().query<{ rate: string }>(
+    `SELECT rate FROM exchange_rates
+     WHERE currency_from = $1 AND currency_to = $2 AND status = 'active'
+     ORDER BY updated_at DESC, effective_at DESC
+     LIMIT 1`,
+    [from, to]
+  );
+  const directRate = Number(direct.rows[0]?.rate ?? 0);
+  if (directRate > 0) return directRate;
+
+  const inverse = await getPool().query<{ rate: string }>(
+    `SELECT rate FROM exchange_rates
+     WHERE currency_from = $1 AND currency_to = $2 AND status = 'active'
+     ORDER BY updated_at DESC, effective_at DESC
+     LIMIT 1`,
+    [to, from]
+  );
+  const inverseRate = Number(inverse.rows[0]?.rate ?? 0);
+  if (inverseRate > 0) return Number((1 / inverseRate).toFixed(8));
+
+  const fromToCny = from === "CNY" ? 1 : 1 / FALLBACK_CNY_RATES[from];
+  const cnyToTarget = to === "CNY" ? 1 : FALLBACK_CNY_RATES[to];
+  return Number((fromToCny * cnyToTarget).toFixed(8));
+}
+
+async function buildConversationQuoteItems(lines: ConversationQuoteLineInput[] | undefined, currency: SupportedCurrency) {
+  if (!lines?.length) return [];
+  const { listProductsFromDb } = await import("./products");
+  const products = await listProductsFromDb();
+  const exchangeRate = await getConversationExchangeRate("CNY", currency);
+  return lines.flatMap((line) => {
+    const product = products.find((entry) => entry.id === line.productId);
+    if (!product || product.status !== "active") return [];
+    const spec = product.specs.find((entry) => entry.id === line.specId) ?? product.specs[0];
+    const quantity = Math.max(1, Math.round(Number(line.quantity || product.moq || 1)));
+    const sourcePrice = Number(spec?.price ?? product.price);
+    const markedCny = applyConversationMarkup(sourcePrice, product.effectiveMarkupValue, product.effectiveMarkupType);
+    const unitPrice = Number((markedCny * exchangeRate).toFixed(4));
+    const sku = spec?.id && spec.id !== "s1" ? `${product.sku}-${spec.id}` : product.sku;
+    return [{
+      id: `qi-conv-${randomUUID()}`,
+      productId: product.id,
+      name: product.name,
+      nameEn: product.nameEn || product.name,
+      sku,
+      quantity,
+      unitPrice,
+      sourceUnitPriceCny: sourcePrice,
+      currency,
+      markupPercent: product.markupPercent,
+      amount: Number((unitPrice * quantity).toFixed(4)),
+      image: spec?.image ?? product.image
+    }];
+  });
 }
 
 export async function ensureConversation(input: {
@@ -77,18 +157,27 @@ export async function ensureConversation(input: {
   }
   if (input.initialMessage) {
     const senderType = input.senderType ?? "system";
+    const translation = senderType === "customer"
+      ? await translateCustomerMessageForAdmin(input.initialMessage)
+      : {
+        sourceLanguage: senderType === "admin" ? "zh-CN" : "zh-CN",
+        translatedLanguage: "zh-CN",
+        sourceText: input.initialMessage,
+        translatedText: input.initialMessage
+      };
     await getPool().query(
       `INSERT INTO conversation_messages (
         id, conversation_id, sender_type, sender_id, source_language, source_text,
         translated_language, translated_text, direction
-       ) VALUES ($1,$2,$3,NULL,$4,$5,'zh-CN',$6,$7)`,
+       ) VALUES ($1,$2,$3,NULL,$4,$5,$6,$7,$8)`,
       [
         `msg-${randomUUID()}`,
         id,
         senderType,
-        senderType === "customer" ? "en" : "zh-CN",
-        input.initialMessage,
-        input.initialMessage,
+        translation.sourceLanguage,
+        translation.sourceText,
+        translation.translatedLanguage,
+        translation.translatedText,
         senderType === "customer" ? "inbound" : "system"
       ]
     );
@@ -157,7 +246,7 @@ export async function listAdminConversations(): Promise<Array<Conversation & {
       COALESCE(c.destination_port, cv.contact_port) AS "destinationPort",
       COALESCE(c.customer_no, '') AS "customerNo",
       COALESCE(c.customer_group, '') AS "customerGroup",
-      (c.id IS NOT NULL) AS "isCustomer",
+      (c.id IS NOT NULL AND NOT c.is_visitor) AS "isCustomer",
       q.quote_no AS "quoteNo",
       q.status AS "quoteStatus"
     FROM conversations cv
@@ -205,13 +294,43 @@ export async function addConversationMessage(input: {
   translatedLanguage?: string;
   translatedText?: string;
   direction?: "inbound" | "outbound" | "system";
+  sendToWhatsapp?: boolean;
+  externalMessageId?: string | null;
+  deliveryStatus?: string | null;
+  deliveryError?: string | null;
 }): Promise<ConversationMessage> {
   await initDb();
   const id = `msg-${randomUUID()}`;
-  const contact = input.senderType === "admin" ? await getConversationContact(input.conversationId) : null;
+  const direction = input.direction ?? (input.senderType === "customer" ? "inbound" : input.senderType === "admin" ? "outbound" : "system");
+  const explicitTranslation = input.translatedText
+    ? {
+      sourceLanguage: input.sourceLanguage ?? "zh-CN",
+      translatedLanguage: input.translatedLanguage ?? input.sourceLanguage ?? "en",
+      sourceText: input.sourceText,
+      translatedText: input.translatedText
+    }
+    : null;
+  const translation = explicitTranslation ?? (
+    input.senderType === "admin"
+      ? await translateAdminMessageForCustomer(input.sourceText)
+      : input.senderType === "customer"
+        ? await translateCustomerMessageForAdmin(input.sourceText)
+        : {
+          sourceLanguage: input.sourceLanguage ?? "zh-CN",
+          translatedLanguage: input.translatedLanguage ?? input.sourceLanguage ?? "zh-CN",
+          sourceText: input.sourceText,
+          translatedText: input.translatedText ?? input.sourceText
+        }
+  );
+  const shouldSendToWhatsapp = input.senderType === "admin" && input.sendToWhatsapp !== false;
+  const contact = shouldSendToWhatsapp ? await getConversationContact(input.conversationId) : null;
   const sendResult = contact
-    ? await sendWhatsAppText(contact.whatsapp, input.sourceText)
-    : { status: "local", externalId: null, error: null };
+    ? await sendWhatsAppText(contact.whatsapp, translation.translatedText)
+    : {
+      status: input.deliveryStatus ?? "local",
+      externalId: input.externalMessageId ?? null,
+      error: input.deliveryError ?? null
+    };
   await getPool().query(
     `INSERT INTO conversation_messages (
       id, conversation_id, sender_type, sender_id, source_language, source_text,
@@ -222,11 +341,11 @@ export async function addConversationMessage(input: {
       input.conversationId,
       input.senderType,
       input.senderId ?? null,
-      input.sourceLanguage ?? "zh-CN",
-      input.sourceText,
-      input.translatedLanguage ?? "zh-CN",
-      input.translatedText ?? input.sourceText,
-      input.direction ?? (input.senderType === "customer" ? "inbound" : input.senderType === "admin" ? "outbound" : "system"),
+      input.sourceLanguage ?? translation.sourceLanguage,
+      translation.sourceText,
+      input.translatedLanguage ?? translation.translatedLanguage,
+      input.translatedText ?? translation.translatedText,
+      direction,
       sendResult.externalId,
       sendResult.status,
       sendResult.error
@@ -268,42 +387,69 @@ export async function ensureContactConversation(input: {
   const pool = getPool();
   const phone = input.contactWhatsapp.replace(/\D/g, "");
 
-  // Check if a formal customer already exists for this phone/email
+  // Contact-us visitors are stored as lightweight customer entities so conversations never lose identity.
   const custResult = await pool.query<{ id: string }>(
-    `SELECT id FROM customers WHERE regexp_replace(whatsapp, '\\D', '', 'g') = $1
-       OR (email = $2 AND $2 <> '')
+    `SELECT id FROM customers
+     WHERE ($1 <> '' AND regexp_replace(whatsapp, '\\D', '', 'g') = $1)
+        OR (LOWER(email) = LOWER($2) AND $2 <> '')
+     ORDER BY is_visitor ASC, updated_at DESC
      LIMIT 1`,
     [phone, input.contactEmail ?? ""]
   );
-  if (custResult.rows[0]) {
-    const id = await ensureConversation({ customerId: custResult.rows[0].id, channel: input.channel, initialMessage: input.initialMessage, senderType: "customer" });
-    return id;
+  let customerId = custResult.rows[0]?.id;
+  if (!customerId) {
+    const { upsertCustomerFromQuote } = await import("./customers");
+    const inferred = inferRegionFromPhone(input.contactWhatsapp);
+    const email = input.contactEmail ||
+      `${input.contactWhatsapp.replace(/[^a-zA-Z0-9]+/g, "").toLowerCase() || randomUUID()}@visitor.local`;
+    customerId = await upsertCustomerFromQuote({
+      company: input.contactCompany || input.contactName || input.contactWhatsapp,
+      contactName: input.contactName || input.contactCompany || input.contactWhatsapp,
+      country: input.contactCountry || inferred?.country || "未知",
+      destinationPort: input.contactPort || "",
+      preferredLanguage: inferred?.language || "en",
+      preferredCurrency: inferred?.currency || "USD",
+      whatsapp: input.contactWhatsapp,
+      email,
+      status: "潜在",
+      group: "潜在客户",
+      notes: "联系我们访客，尚未关联报价单。",
+      isVisitor: true,
+    });
+    await bindCustomerIdentities(customerId, { email, whatsapp: input.contactWhatsapp });
   }
 
-  // Find existing contact-conversation by whatsapp
   const existing = await pool.query<{ id: string }>(
     `SELECT id FROM conversations
-     WHERE customer_id IS NULL
-       AND regexp_replace(contact_whatsapp, '\\D', '', 'g') = $1
+     WHERE customer_id = $1
+       AND quote_id IS NULL
      ORDER BY created_at DESC LIMIT 1`,
-    [phone]
+    [customerId]
   );
   const id = existing.rows[0]?.id ?? `conv-${randomUUID()}`;
   if (!existing.rows[0]) {
     await pool.query(
       `INSERT INTO conversations (id, customer_id, channel, status, last_message_at,
          contact_name, contact_whatsapp, contact_email, contact_company, contact_country, contact_port)
-       VALUES ($1, NULL, $2, 'open', now(), $3, $4, $5, $6, $7, $8)`,
-      [id, input.channel, input.contactName ?? "", input.contactWhatsapp, input.contactEmail ?? "",
+       VALUES ($1, $2, $3, 'open', now(), $4, $5, $6, $7, $8, $9)`,
+      [id, customerId, input.channel, input.contactName ?? "", input.contactWhatsapp, input.contactEmail ?? "",
        input.contactCompany ?? "", input.contactCountry ?? "", input.contactPort ?? ""]
     );
   }
   if (input.initialMessage) {
+    const translation = await translateCustomerMessageForAdmin(input.initialMessage);
     await pool.query(
       `INSERT INTO conversation_messages (id, conversation_id, sender_type, sender_id,
          source_language, source_text, translated_language, translated_text, direction)
-       VALUES ($1,$2,'customer',NULL,'en',$3,'zh-CN',$3,'inbound')`,
-      [`msg-${randomUUID()}`, id, input.initialMessage]
+       VALUES ($1,$2,'customer',NULL,$3,$4,$5,$6,'inbound')`,
+      [
+        `msg-${randomUUID()}`,
+        id,
+        translation.sourceLanguage,
+        translation.sourceText,
+        translation.translatedLanguage,
+        translation.translatedText
+      ]
     );
     await pool.query("UPDATE conversations SET last_message_at = now() WHERE id = $1", [id]);
   }
@@ -315,10 +461,11 @@ export async function convertConversationToCustomer(conversationId: string): Pro
   const pool = getPool();
   const convResult = await pool.query<{
     customer_id: string | null;
+    channel: "whatsapp" | "site";
     contact_name: string; contact_whatsapp: string; contact_email: string;
     contact_company: string; contact_country: string; contact_port: string;
   }>(
-    `SELECT customer_id, contact_name, contact_whatsapp, contact_email,
+    `SELECT customer_id, channel, contact_name, contact_whatsapp, contact_email,
             contact_company, contact_country, contact_port
      FROM conversations WHERE id = $1`,
     [conversationId]
@@ -326,36 +473,70 @@ export async function convertConversationToCustomer(conversationId: string): Pro
   const conv = convResult.rows[0];
   if (!conv) return null;
   const { getCustomerById, upsertCustomerFromQuote } = await import("./customers");
-  if (conv.customer_id) return getCustomerById(conv.customer_id);
+  if (conv.customer_id) {
+    const before = await pool.query<{ is_visitor: boolean }>("SELECT is_visitor FROM customers WHERE id = $1", [conv.customer_id]);
+    await pool.query(
+      `UPDATE customers
+       SET is_visitor = false,
+           status = CASE WHEN status = '潜在' THEN '跟进中' ELSE status END,
+           customer_group = CASE WHEN customer_group = '潜在客户' THEN '普通客户' ELSE customer_group END,
+           last_follow_up_at = now(),
+           updated_at = now()
+       WHERE id = $1`,
+      [conv.customer_id]
+    );
+    if (before.rows[0]?.is_visitor) {
+      await createSystemFollowup({
+        customerId: conv.customer_id,
+        type: "客户跟进",
+        status: "跟进中",
+        owner: "系统",
+        content: `联系我们会话已转为客户。来源：${conv.contact_company || conv.contact_name || conv.contact_whatsapp}。`
+      });
+    }
+    return getCustomerById(conv.customer_id);
+  }
+  const inferred = inferRegionFromPhone(conv.contact_whatsapp);
 
   const email = conv.contact_email ||
     `${conv.contact_whatsapp.replace(/[^a-zA-Z0-9]+/g, "").toLowerCase() || randomUUID()}@whatsapp.local`;
   const customerId = await upsertCustomerFromQuote({
     company: conv.contact_company || conv.contact_name || conv.contact_whatsapp,
     contactName: conv.contact_name || conv.contact_company || conv.contact_whatsapp,
-    country: conv.contact_country || "Unknown",
+    country: conv.contact_country || inferred?.country || "未知",
     destinationPort: conv.contact_port || "",
+    preferredLanguage: inferred?.language || "en",
+    preferredCurrency: inferred?.currency || "USD",
     whatsapp: conv.contact_whatsapp,
     email,
     status: "活跃",
     group: "普通客户",
+    isVisitor: false,
   });
   await pool.query("UPDATE conversations SET customer_id = $1 WHERE id = $2", [customerId, conversationId]);
+  await createSystemFollowup({
+    customerId,
+    type: "客户跟进",
+    status: "跟进中",
+    owner: "系统",
+    content: `联系我们会话已转为客户。来源：${conv.contact_company || conv.contact_name || conv.contact_whatsapp}。`
+  });
   return getCustomerById(customerId);
 }
 
 export async function createQuoteForConversation(
   conversationId: string,
-  opts: { destinationPort?: string; containerType?: string; currency?: "CNY" | "USD" }
+  opts: { destinationPort?: string; containerType?: string; currency?: SupportedCurrency; items?: ConversationQuoteLineInput[] }
 ): Promise<import("./types").QuoteWithItems> {
   await initDb();
   const pool = getPool();
   const convResult = await pool.query<{
     customer_id: string | null;
+    channel: "whatsapp" | "site";
     contact_name: string; contact_whatsapp: string; contact_email: string;
     contact_company: string; contact_country: string; contact_port: string;
   }>(
-    `SELECT customer_id, contact_name, contact_whatsapp, contact_email,
+    `SELECT customer_id, channel, contact_name, contact_whatsapp, contact_email,
             contact_company, contact_country, contact_port
      FROM conversations WHERE id = $1`,
     [conversationId]
@@ -368,12 +549,30 @@ export async function createQuoteForConversation(
     const customer = await convertConversationToCustomer(conversationId);
     if (!customer) throw new Error("Could not create customer");
     customerId = customer.id;
+  } else {
+    await pool.query(
+      `UPDATE customers
+       SET is_visitor = false,
+           status = CASE WHEN status = '潜在' THEN '跟进中' ELSE status END,
+           customer_group = CASE WHEN customer_group = '潜在客户' THEN '普通客户' ELSE customer_group END,
+           last_follow_up_at = now(),
+           updated_at = now()
+       WHERE id = $1`,
+      [customerId]
+    );
   }
 
   const custResult = await pool.query<{
-    contact_name: string; company: string; country: string; destination_port: string; whatsapp: string; email: string;
+    contact_name: string;
+    company: string;
+    country: string;
+    destination_port: string;
+    preferred_language: string;
+    preferred_currency: SupportedCurrency;
+    whatsapp: string;
+    email: string;
   }>(
-    "SELECT contact_name, company, country, destination_port, whatsapp, email FROM customers WHERE id = $1",
+    "SELECT contact_name, company, country, destination_port, preferred_language, preferred_currency, whatsapp, email FROM customers WHERE id = $1",
     [customerId]
   );
   const cust = custResult.rows[0];
@@ -385,22 +584,67 @@ export async function createQuoteForConversation(
   const quoteNo = `QT-${date}-${seq}`;
   const port = opts.destinationPort ?? conv.contact_port ?? cust.destination_port ?? "";
   const containerType = opts.containerType ?? "20GP";
-  const currency = opts.currency ?? "USD";
+  const inferred = inferRegionFromPhone(cust.whatsapp);
+  const currency = opts.currency ?? cust.preferred_currency ?? inferred?.currency ?? "USD";
+  const preferredLanguage = cust.preferred_language || inferred?.language || "en";
+  const items = await buildConversationQuoteItems(opts.items, currency);
+  const productAmount = items.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
+  const exchangeRateToCny = await getConversationExchangeRate(currency, "CNY");
 
   await pool.query(
-    `INSERT INTO quotes (id, quote_no, customer_id, customer_name, contact_name, company, country, port,
+    `INSERT INTO quotes (id, quote_no, customer_id, customer_name, contact_name, company, country, port, preferred_language,
        whatsapp, email, container_type, product_amount, shipping_fee, status, currency, exchange_rate,
        local_fee, document_fee, customs_fee, insurance_fee, loaded_volume_m3, max_volume_m3,
        current_weight_kg, max_weight_kg)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0,0,'新询价',$12,7.2,0,0,0,0,0,33,0,27000)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0,'新询价',$14,$15,0,0,0,0,0,33,0,27000)`,
     [quoteId, quoteNo, customerId, cust.contact_name, cust.contact_name, cust.company,
-     cust.country, port, cust.whatsapp, cust.email, containerType, currency]
+     cust.country, port, preferredLanguage, cust.whatsapp, cust.email, containerType, productAmount, currency, exchangeRateToCny]
   );
-  // Link conversation to the new quote
-  await pool.query(
-    "UPDATE conversations SET quote_id = $1 WHERE id = $2 AND (quote_id IS NULL)",
+  for (const item of items) {
+    await pool.query(
+      `INSERT INTO quote_items (
+        id, quote_id, product_id, name, name_en, sku, quantity, unit_price,
+        source_unit_price_cny, currency, markup_percent, image
+       )
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [
+        item.id,
+        quoteId,
+        item.productId,
+        item.name,
+        item.nameEn ?? null,
+        item.sku,
+        item.quantity,
+        item.unitPrice,
+        item.sourceUnitPriceCny ?? null,
+        item.currency,
+        item.markupPercent ?? 0,
+        item.image ?? null
+      ]
+    );
+  }
+  const targetConversationResult = await pool.query<{ id: string }>(
+    `UPDATE conversations
+     SET quote_id = $1, last_message_at = now()
+     WHERE id = $2 AND quote_id IS NULL
+     RETURNING id`,
     [quoteId, conversationId]
   );
+  if (!targetConversationResult.rows[0]) {
+    await pool.query(
+      `INSERT INTO conversations (id, customer_id, quote_id, channel, status, last_message_at)
+       VALUES ($1,$2,$3,$4,'open',now())`,
+      [`conv-${randomUUID()}`, customerId, quoteId, conv.channel]
+    );
+  }
+  await createSystemFollowup({
+    customerId,
+    quoteId,
+    type: "报价跟进",
+    status: "跟进中",
+    owner: "沟通中心",
+    content: `沟通中心基于会话创建报价单 ${quoteNo}，报价状态：新询价。`
+  });
 
   const { getQuoteById } = await import("./quotes");
   const quote = await getQuoteById(quoteId);
@@ -433,27 +677,39 @@ export async function recordInboundWhatsAppMessage(input: {
   );
   let customerId = identity.rows[0]?.customer_id;
   if (!customerId) {
+    const inferred = inferRegionFromPhone(input.from);
     customerId = await upsertCustomerFromQuote({
       company: `WhatsApp ${normalized}`,
       contactName: `WhatsApp ${normalized}`,
-      country: "未知",
+      country: inferred?.country || "未知",
       destinationPort: "待确认",
+      preferredLanguage: inferred?.language || "en",
+      preferredCurrency: inferred?.currency || "USD",
       whatsapp: input.from,
       email: `${normalized || randomUUID()}@whatsapp.local`,
       status: "潜在",
       group: "潜在客户",
-      notes: "WhatsApp webhook 自动创建的潜在客户。"
+      notes: "WhatsApp webhook 自动创建的潜在客户。",
+      isVisitor: true,
     });
     await bindCustomerIdentities(customerId, { whatsapp: input.from });
   }
-  const conversationId = await ensureConversation({ customerId, quoteId: null, channel: "whatsapp" });
+  const latestConversation = await getPool().query<{ id: string }>(
+    `SELECT id
+     FROM conversations
+     WHERE customer_id = $1
+     ORDER BY (quote_id IS NOT NULL) DESC, COALESCE(last_message_at, created_at) DESC
+     LIMIT 1`,
+    [customerId]
+  );
+  const conversationId = latestConversation.rows[0]?.id
+    ?? await ensureConversation({ customerId, quoteId: null, channel: "whatsapp" });
   const message = await addConversationMessage({
     conversationId,
     senderType: "customer",
     sourceLanguage: "en",
     sourceText: input.text,
     translatedLanguage: "zh-CN",
-    translatedText: input.text,
     direction: "inbound"
   });
   if (input.externalMessageId) {

@@ -15,9 +15,10 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { AdminTop } from "../shared/AdminTop";
+import { FtSelect } from "../shared/FtSelect";
 import { PaginationFooter } from "../shared/PaginationFooter";
 import { SmallMetric } from "../shared/SmallMetric";
-import { countryFlag } from "../shared/utils";
+import { countryFlag, downloadAdminExport } from "../shared/utils";
 import { useAutoDismissMessage, usePagination } from "../shared/hooks";
 import { CustomerDetail } from "./CustomerDetail";
 import { CustomerEditorModal, emptyCustomer } from "./CustomerEditorModal";
@@ -161,7 +162,6 @@ export function CustomersAdmin({ onOpenConversation }: { onOpenConversation: (ta
   return (
     <>
       <AdminTop title="客户管理" subtitle="沉淀客户资料、询盘历史与跟进状态">
-        <label className="top-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索客户名称、联系人、WhatsApp..." /></label>
         <button className="admin-light"><Download size={18} /> 导入客户</button>
         <button className="admin-primary" onClick={() => setEditing(emptyCustomer())}><Plus size={18} /> 新增客户</button>
       </AdminTop>
@@ -177,18 +177,21 @@ export function CustomersAdmin({ onOpenConversation }: { onOpenConversation: (ta
         <section className="admin-panel">
           <div className="admin-filters">
             <label><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索客户名称、联系人、WhatsApp..." /></label>
-            <select value={countryFilter} onChange={(event) => setCountryFilter(event.target.value)}><option value="all">国家/地区</option>{countries.map((country) => <option key={country}>{country}</option>)}</select>
-            <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}><option value="all">客户分组</option><option>重要客户</option><option>普通客户</option><option>潜在客户</option></select>
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">客户状态</option><option>活跃</option><option>跟进中</option><option>潜在</option><option>失效</option></select>
+            <FtSelect value={countryFilter} options={[{ value: "all", label: "国家/地区" }, ...countries.map((country) => ({ value: country, label: country }))]} onChange={setCountryFilter} />
+            <FtSelect value={groupFilter} options={[{ value: "all", label: "客户分组" }, { value: "重要客户", label: "重要客户" }, { value: "普通客户", label: "普通客户" }, { value: "潜在客户", label: "潜在客户" }]} onChange={setGroupFilter} />
+            <FtSelect value={statusFilter} options={[{ value: "all", label: "客户状态" }, { value: "活跃", label: "活跃" }, { value: "跟进中", label: "跟进中" }, { value: "潜在", label: "潜在" }, { value: "失效", label: "失效" }]} onChange={setStatusFilter} />
             <button onClick={resetFilters}><RefreshCw size={16} /> 重置</button>
-            <button><Download size={16} /> 导出</button>
+            <button onClick={() => downloadAdminExport("customers")}><Download size={16} /> 导出</button>
           </div>
           <div className="bulk-bar">
             <span>已选 <strong>{selectedCustomerIds.size}</strong> 个</span>
-            <select disabled={selectedCustomerIds.size === 0} onChange={(event) => { if (event.target.value) void bulkUpdateCustomerStatus(event.target.value as CustomerStatus); event.currentTarget.value = ""; }} defaultValue="">
-              <option value="">批量状态</option>
-              <option>活跃</option><option>跟进中</option><option>潜在</option><option>失效</option>
-            </select>
+            <FtSelect
+              className="bulk-status-select"
+              disabled={selectedCustomerIds.size === 0}
+              value=""
+              options={[{ value: "", label: "批量状态" }, { value: "活跃", label: "活跃" }, { value: "跟进中", label: "跟进中" }, { value: "潜在", label: "潜在" }, { value: "失效", label: "失效" }]}
+              onChange={(value) => { if (value) void bulkUpdateCustomerStatus(value as CustomerStatus); }}
+            />
             <button className="danger-action" disabled={selectedCustomerIds.size === 0} onClick={() => void bulkRemoveCustomers()}>批量删除</button>
           </div>
           <div className="admin-table-scroll">
@@ -201,7 +204,7 @@ export function CustomersAdmin({ onOpenConversation }: { onOpenConversation: (ta
                 <tr key={customer.id} className={selected?.id === customer.id ? "selected" : ""} onClick={() => setSelectedId(customer.id)}>
                   <td className="sticky-select-col"><input type="checkbox" checked={selectedCustomerIds.has(customer.id)} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelectCustomer(customer.id)} /></td>
                   <td><strong>{customer.company}</strong></td>
-                  <td>{countryFlag(customer.country)} {customer.country}</td>
+                  <td>{countryFlag(customer.country)} {customer.country} · {customer.preferredCurrency}</td>
                   <td>{customer.contactName}</td>
                   <td>
                     <button

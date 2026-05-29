@@ -16,9 +16,11 @@ import {
 import Image from "next/image";
 import { useEffect, useState } from "react";
 import { AdminTop } from "../shared/AdminTop";
+import { FtSelect } from "../shared/FtSelect";
 import { PaginationFooter } from "../shared/PaginationFooter";
 import { SmallMetric } from "../shared/SmallMetric";
 import { useAutoDismissMessage, usePagination } from "../shared/hooks";
+import { downloadAdminExport } from "../shared/utils";
 import { SupplierDetail, SupplierProductMini } from "./SupplierDetail";
 import { SupplierEditorModal, emptySupplier, supplierBusinessModels, supplierShopTypes } from "./SupplierEditorModal";
 import type { Supplier, SupplierFormState, SupplierMetrics, SupplierStatus } from "./types";
@@ -170,16 +172,16 @@ export function SuppliersAdmin() {
   return (
     <>
       <AdminTop title="供应商管理" subtitle="管理1688供应商信息，搜索产品快速找到优质供应商">
-        <button className="admin-light"><Download size={18} /> 导出结果</button>
+        <button className="admin-light" onClick={() => downloadAdminExport("suppliers")}><Download size={18} /> 导出结果</button>
         <button className="admin-primary" onClick={() => setEditing(emptySupplier())}><Plus size={18} /> 新增供应商</button>
       </AdminTop>
       {message && <div className="admin-message">{message}</div>}
       <section className="admin-panel supplier-search-panel">
         <div className="supplier-search-grid">
           <label>产品搜索<div><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="产品名称、SKU、关键词..." />{query && <button type="button" onClick={() => setQuery("")}><X size={14} /></button>}</div></label>
-          <label>经营模式<select value={businessFilter} onChange={(event) => setBusinessFilter(event.target.value)}><option value="all">全部</option>{supplierBusinessModels.map((item) => <option key={item}>{item}</option>)}</select></label>
-          <label>所在地区<select value={regionFilter} onChange={(event) => setRegionFilter(event.target.value)}><option value="all">全部</option>{regions.map((region) => <option key={region}>{region}</option>)}</select></label>
-          <label>1688店铺类型<select value={shopFilter} onChange={(event) => setShopFilter(event.target.value)}><option value="all">全部</option>{supplierShopTypes.map((item) => <option key={item}>{item}</option>)}</select></label>
+          <label>经营模式<FtSelect value={businessFilter} options={[{ value: "all", label: "全部" }, ...supplierBusinessModels.map((item) => ({ value: item, label: item }))]} onChange={setBusinessFilter} /></label>
+          <label>所在地区<FtSelect value={regionFilter} options={[{ value: "all", label: "全部" }, ...regions.map((region) => ({ value: region, label: region }))]} onChange={setRegionFilter} /></label>
+          <label>1688店铺类型<FtSelect value={shopFilter} options={[{ value: "all", label: "全部" }, ...supplierShopTypes.map((item) => ({ value: item, label: item }))]} onChange={setShopFilter} /></label>
           <button className="admin-primary">搜索</button>
           <button className="admin-light" onClick={resetFilters}>重置</button>
         </div>

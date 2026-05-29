@@ -5,7 +5,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  ClipboardList,
   Download,
   Edit3,
   GripVertical,
@@ -18,8 +17,9 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AdminTop } from "../shared/AdminTop";
+import { FtSelect } from "../shared/FtSelect";
 import { SmallMetric } from "../shared/SmallMetric";
-import { iconGlyph } from "../shared/utils";
+import { downloadAdminExport, iconGlyph } from "../shared/utils";
 import { useAutoDismissMessage } from "../shared/hooks";
 import { CategoryDetail } from "./CategoryDetail";
 import { CategoryEditorModal, categoryMatchesFilter, collectDescendantCategoryIds } from "./CategoryEditorModal";
@@ -99,7 +99,6 @@ export function ProductCategoriesAdmin() {
     total: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter)).length,
     level1: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter) && category.level === 1).length,
     level2: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter) && category.level === 2).length,
-    level3: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter) && category.level === 3).length,
     active: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter) && category.status === "active").length,
     linkedProducts: rows.filter((category) => categoryMatchesFilter(category, query, statusFilter, levelFilter)).reduce((sum, category) => sum + category.productCount, 0)
   };
@@ -112,6 +111,7 @@ export function ProductCategoriesAdmin() {
       .then((response) => response.json())
       .then((data: { categories: CategoryWithMeta[] }) => {
         setRows(data.categories);
+        setExpanded(new Set(data.categories.filter((category) => category.level === 1 || data.categories.some((child) => child.parentId === category.id)).map((category) => category.id)));
         setSelectedCategoryIds(new Set());
         setSelectedId((current) => {
           if (current || categorySelectionInitialized.current) return current;
@@ -213,7 +213,9 @@ export function ProductCategoriesAdmin() {
       status: form.status,
       description: form.description,
       metaTitle: form.metaTitle,
-      metaDescription: form.metaDescription
+      metaDescription: form.metaDescription,
+      markupValue: form.markupValue === "" ? null : Number(form.markupValue),
+      markupType: form.markupType
     };
     const response = await fetch("/api/admin/categories", {
       method: form.id ? "PUT" : "POST",
@@ -270,16 +272,9 @@ export function ProductCategoriesAdmin() {
       return;
     }
 
-    const moveAsChild = mode === "inside" && target.level < 3;
+    const moveAsChild = mode === "inside";
     const nextParentId = moveAsChild ? target.id : target.parentId;
     const nextLevel = moveAsChild ? target.level + 1 : target.level;
-    const maxDescendantOffset = Math.max(0, ...rows
-      .filter((category) => descendantIds.has(category.id))
-      .map((category) => category.level - dragged.level));
-    if (nextLevel + maxDescendantOffset > 3) {
-      setMessage("该分类包含下级分类，移动后会超过三级分类限制。");
-      return;
-    }
 
     const siblings = rows
       .filter((category) => (category.parentId ?? null) === (nextParentId ?? null) && category.id !== dragged.id)
@@ -384,15 +379,14 @@ export function ProductCategoriesAdmin() {
   return (
     <>
       <AdminTop title="产品分类" subtitle="管理所有产品分类，支持多级分类，方便产品归类和展示">
-        <button className="admin-light"><Download size={18} /> 导出数据</button>
+        <button className="admin-light" onClick={() => downloadAdminExport("categories")}><Download size={18} /> 导出数据</button>
         <button className="admin-primary" onClick={createTopCategory}><Plus size={18} /> 添加一级分类</button>
       </AdminTop>
       {message && <div className="admin-message">{message}</div>}
-      <div className="admin-metrics six category-metrics">
+      <div className="admin-metrics five category-metrics">
         <SmallMetric label="全部分类" value={String(filteredMetrics.total)} icon={Box} />
-        <SmallMetric label="一级分类" value={String(filteredMetrics.level1)} icon={Users} green />
-        <SmallMetric label="二级分类" value={String(filteredMetrics.level2)} icon={Package} />
-        <SmallMetric label="三级分类" value={String(filteredMetrics.level3)} icon={ClipboardList} purple />
+        <SmallMetric label="顶级分类" value={String(filteredMetrics.level1)} icon={Users} green />
+        <SmallMetric label="子分类" value={String(filteredMetrics.level2 + filteredMetrics.total - filteredMetrics.level1)} icon={Package} />
         <SmallMetric label="已启用分类" value={String(filteredMetrics.active)} icon={CheckCircle2} red />
         <SmallMetric label="关联产品SKU" value={String(filteredMetrics.linkedProducts)} icon={Box} green />
       </div>
@@ -400,17 +394,23 @@ export function ProductCategoriesAdmin() {
         <section className="admin-panel category-table-panel">
           <div className="admin-filters">
             <label><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索分类名称..." /></label>
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-              <option value="all">状态：全部</option>
-              <option value="active">启用</option>
-              <option value="inactive">停用</option>
-            </select>
-            <select value={levelFilter} onChange={(event) => setLevelFilter(event.target.value)}>
-              <option value="all">级别：全部</option>
-              <option value="1">一级</option>
-              <option value="2">二级</option>
-              <option value="3">三级</option>
-            </select>
+            <FtSelect
+              value={statusFilter}
+              options={[
+                { value: "all", label: "状态：全部" },
+                { value: "active", label: "启用" },
+                { value: "inactive", label: "停用" }
+              ]}
+              onChange={setStatusFilter}
+            />
+            <FtSelect
+              value={levelFilter}
+              options={[
+                { value: "all", label: "级别：全部" },
+                ...Array.from(new Set(rows.map((c) => c.level))).sort((a, b) => a - b).map((lv) => ({ value: String(lv), label: `${lv}级` }))
+              ]}
+              onChange={setLevelFilter}
+            />
             <button className={allExpandableCategoriesExpanded ? "filter-toggle active" : "filter-toggle"} onClick={expandAll}>
               <span className="mini-switch" aria-hidden="true" />
               {allExpandableCategoriesExpanded ? "全部展开" : "全部收起"}
@@ -494,7 +494,7 @@ export function ProductCategoriesAdmin() {
                       </div>
                     </td>
                     <td><span className="category-icon-mini">{iconGlyph(category.icon)}</span></td>
-                    <td><span className="level-pill">{category.level === 1 ? "一级" : category.level === 2 ? "二级" : "三级"}</span></td>
+                    <td><span className="level-pill">{category.level}级</span></td>
                     <td>{category.sortOrder}</td>
                     <td>{category.productCount}</td>
                     <td className="sticky-status-col">
@@ -504,10 +504,12 @@ export function ProductCategoriesAdmin() {
                         onClick={(event) => { event.stopPropagation(); void toggleStatus(category); }}
                       />
                     </td>
-                    <td className="row-actions sticky-actions-col">
-                      <button onClick={(event) => { event.stopPropagation(); openCategoryEditor(category); }}><Edit3 size={16} /></button>
-                      <button onClick={(event) => { event.stopPropagation(); createChildCategory(category); }}><Plus size={16} /></button>
-                      <button className="danger-action" onClick={(event) => { event.stopPropagation(); void removeCategory(category); }}><Trash2 size={16} /></button>
+                    <td className="sticky-actions-col">
+                      <div className="row-actions">
+                        <button onClick={(event) => { event.stopPropagation(); openCategoryEditor(category); }}><Edit3 size={16} /></button>
+                        <button onClick={(event) => { event.stopPropagation(); createChildCategory(category); }}><Plus size={16} /></button>
+                        <button className="danger-action" onClick={(event) => { event.stopPropagation(); void removeCategory(category); }}><Trash2 size={16} /></button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -536,6 +538,16 @@ export function ProductCategoriesAdmin() {
           saving={saving}
           onClose={() => { setEditingCategory(null); setDraftParentId(null); setCreatingCategory(false); if (!selectedId) setSelectedId(rows[0]?.id ?? null); }}
           onSubmit={saveCategory}
+          onPrev={(() => {
+            if (!editingCategory) return undefined;
+            const idx = visibleRows.findIndex((c) => c.id === editingCategory.id);
+            return idx > 0 ? () => setEditingCategory(visibleRows[idx - 1]) : undefined;
+          })()}
+          onNext={(() => {
+            if (!editingCategory) return undefined;
+            const idx = visibleRows.findIndex((c) => c.id === editingCategory.id);
+            return idx < visibleRows.length - 1 ? () => setEditingCategory(visibleRows[idx + 1]) : undefined;
+          })()}
         />
       )}
     </>

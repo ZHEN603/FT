@@ -1,10 +1,11 @@
 "use client";
 
-import { X } from "lucide-react";
+import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { useState } from "react";
 import { AdminModalBackdrop } from "../shared/AdminModalBackdrop";
+import { FtSelect } from "../shared/FtSelect";
 import { iconGlyph, CATEGORY_ICON_OPTIONS } from "../shared/utils";
-import { CategoryMarkupTab } from "../markups/CategoryMarkupTab";
+import { SimpleMarkupControl } from "../shared/SimpleMarkupControl";
 import type { CategoryWithMeta, CategoryFormState, CategoryStatus } from "./types";
 
 export function categoryToForm(
@@ -21,12 +22,14 @@ export function categoryToForm(
     nameEn: category?.nameEn ?? "",
     icon: category?.icon ?? "hanger",
     parentId,
-    level: String(category?.level ?? (draftParent ? Math.min(draftParent.level + 1, 3) : 1)),
+    level: String(category?.level ?? (draftParent ? draftParent.level + 1 : 1)),
     sortOrder: String(category?.sortOrder ?? nextSort),
     status: category?.status ?? "active",
     description: category?.description ?? "",
     metaTitle: category?.metaTitle ?? "",
-    metaDescription: category?.metaDescription ?? ""
+    metaDescription: category?.metaDescription ?? "",
+    markupValue: category?.markupValue == null ? "" : String(category.markupValue),
+    markupType: category?.markupType ?? "percentage"
   };
 }
 
@@ -61,7 +64,9 @@ export function CategoryEditorModal({
   draftParentId,
   saving,
   onClose,
-  onSubmit
+  onSubmit,
+  onPrev,
+  onNext
 }: {
   category: CategoryWithMeta | null;
   categories: CategoryWithMeta[];
@@ -69,10 +74,11 @@ export function CategoryEditorModal({
   saving: boolean;
   onClose: () => void;
   onSubmit: (form: CategoryFormState) => Promise<boolean> | boolean | void;
+  onPrev?: () => void;
+  onNext?: () => void;
 }) {
   const [form, setForm] = useState<CategoryFormState>(() => categoryToForm(category, categories, draftParentId ?? null));
-  const [tab, setTab] = useState<"info" | "markup">("info");
-  const parentOptions = categories.filter((e) => e.id !== form.id && e.level < 3);
+  const parentOptions = categories.filter((e) => e.id !== form.id);
   const parent = categories.find((e) => e.id === form.parentId);
 
   function update<K extends keyof CategoryFormState>(key: K, value: CategoryFormState[K]) {
@@ -80,7 +86,7 @@ export function CategoryEditorModal({
       if (key === "parentId") {
         const parentId = String(value ?? "none");
         const selectedParent = categories.find((e) => e.id === parentId);
-        return { ...current, parentId, level: selectedParent ? String(Math.min(selectedParent.level + 1, 3)) : "1" };
+        return { ...current, parentId, level: selectedParent ? String(selectedParent.level + 1) : "1" };
       }
       return { ...current, [key]: value };
     });
@@ -94,78 +100,88 @@ export function CategoryEditorModal({
   return (
     <AdminModalBackdrop>
       <form className="admin-category-modal" onSubmit={(e) => { e.preventDefault(); void handleSubmit(); }}>
-        <div className="detail-head">
+        <div className="admin-modal-titlebar">
           <h2>{category ? "编辑分类" : "新增分类"}</h2>
-          <button type="button" onClick={onClose}><X size={18} /></button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {category && (
+              <div className="admin-modal-nav">
+                <button type="button" disabled={!onPrev} onClick={onPrev} title="上一个分类"><ChevronLeft size={14} /></button>
+                <button type="button" disabled={!onNext} onClick={onNext} title="下一个分类"><ChevronRight size={14} /></button>
+              </div>
+            )}
+            <button type="button" className="admin-modal-close" onClick={onClose}><X size={16} /></button>
+          </div>
         </div>
 
-        {category && (
-          <div className="detail-tabs modal-tabs">
-            <button type="button" className={tab === "info" ? "active" : ""} onClick={() => setTab("info")}>基本信息</button>
-            <button type="button" className={tab === "markup" ? "active" : ""} onClick={() => setTab("markup")}>加价管理</button>
+        <>
+          <div className="category-modal-body">
+            <div className="category-preview">
+              <span>{iconGlyph(form.icon)}</span>
+              <strong>{form.name || "新分类"} <em>{form.nameEn || "New Category"}</em></strong>
+              <i>{form.status === "active" ? "启用" : "停用"}</i>
+            </div>
+            <h3>基本信息</h3>
+            <div className="category-form modal-grid">
+              <label>分类名称（中文）<input required value={form.name} onChange={(e) => update("name", e.target.value)} /></label>
+              <label>分类名称（英文）<input required value={form.nameEn} onChange={(e) => update("nameEn", e.target.value)} /></label>
+              <label>上级分类
+                <FtSelect
+                  value={form.parentId}
+                  onChange={(v) => update("parentId", v)}
+                  options={[
+                    { value: "none", label: "一级分类" },
+                    ...parentOptions.map((e) => ({ value: e.id, label: e.name }))
+                  ]}
+                />
+              </label>
+              <div className="category-icon-picker">
+                <span>分类图标</span>
+                <div>
+                  {CATEGORY_ICON_OPTIONS.map((opt) => (
+                    <button key={opt.id} type="button" className={form.icon === opt.id ? "active" : ""} onClick={() => update("icon", opt.id)} aria-label={`选择${opt.label}图标`}>
+                      <strong>{opt.glyph}</strong>
+                      <em>{opt.label}</em>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label>排序<input type="number" min="1" value={form.sortOrder} onChange={(e) => update("sortOrder", e.target.value)} /></label>
+              <label>状态
+                <FtSelect
+                  value={form.status}
+                  onChange={(v) => update("status", v as CategoryStatus)}
+                  options={[{ value: "active", label: "启用" }, { value: "inactive", label: "停用" }]}
+                />
+              </label>
+              <div className="category-count-card">
+                <span>产品数量</span>
+                <strong>{category?.productCount ?? 0}</strong>
+                <em>{parent ? `${parent.name} 下级分类` : "顶级分类"}</em>
+              </div>
+              <label className="full-col">分类描述<textarea maxLength={200} value={form.description} onChange={(e) => update("description", e.target.value)} /></label>
+            </div>
+            <h3>加价设置</h3>
+            <div className="category-form">
+              <SimpleMarkupControl
+                value={form.markupValue}
+                type={form.markupType}
+                onValueChange={(value) => update("markupValue", value)}
+                onTypeChange={(value) => update("markupType", value)}
+                label="分类加价"
+                hint="产品未设置时，优先使用最接近产品的子分类，再向上继承目录，最后使用全部产品默认"
+              />
+            </div>
+            <h3>SEO设置</h3>
+            <div className="category-form">
+              <label>Meta 标题（SEO）<input value={form.metaTitle} onChange={(e) => update("metaTitle", e.target.value)} /></label>
+              <label>Meta 描述（SEO）<textarea maxLength={160} value={form.metaDescription} onChange={(e) => update("metaDescription", e.target.value)} /></label>
+            </div>
           </div>
-        )}
-
-        {tab === "info" ? (
-          <>
-            <div className="category-modal-body">
-              <div className="category-preview">
-                <span>{iconGlyph(form.icon)}</span>
-                <strong>{form.name || "新分类"} <em>{form.nameEn || "New Category"}</em></strong>
-                <i>{form.status === "active" ? "启用" : "停用"}</i>
-              </div>
-              <h3>基本信息</h3>
-              <div className="category-form modal-grid">
-                <label>分类名称（中文）<input required value={form.name} onChange={(e) => update("name", e.target.value)} /></label>
-                <label>分类名称（英文）<input required value={form.nameEn} onChange={(e) => update("nameEn", e.target.value)} /></label>
-                <label>上级分类<select value={form.parentId} onChange={(e) => update("parentId", e.target.value)}>
-                  <option value="none">一级分类</option>
-                  {parentOptions.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
-                </select></label>
-                <div className="category-icon-picker">
-                  <span>分类图标</span>
-                  <div>
-                    {CATEGORY_ICON_OPTIONS.map((opt) => (
-                      <button key={opt.id} type="button" className={form.icon === opt.id ? "active" : ""} onClick={() => update("icon", opt.id)} aria-label={`选择${opt.label}图标`}>
-                        <strong>{opt.glyph}</strong>
-                        <em>{opt.label}</em>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <label>排序<input type="number" min="1" value={form.sortOrder} onChange={(e) => update("sortOrder", e.target.value)} /></label>
-                <label>状态<select value={form.status} onChange={(e) => update("status", e.target.value as CategoryStatus)}>
-                  <option value="active">启用</option>
-                  <option value="inactive">停用</option>
-                </select></label>
-                <div className="category-count-card">
-                  <span>产品数量</span>
-                  <strong>{category?.productCount ?? 0}</strong>
-                  <em>{parent ? `${parent.name} 下级分类` : "顶级分类"}</em>
-                </div>
-                <label>分类描述<textarea maxLength={200} value={form.description} onChange={(e) => update("description", e.target.value)} /></label>
-              </div>
-              <h3>SEO设置</h3>
-              <div className="category-form">
-                <label>Meta 标题（SEO）<input value={form.metaTitle} onChange={(e) => update("metaTitle", e.target.value)} /></label>
-                <label>Meta 描述（SEO）<textarea maxLength={160} value={form.metaDescription} onChange={(e) => update("metaDescription", e.target.value)} /></label>
-              </div>
-            </div>
-            <div className="detail-actions">
-              <button className="admin-light" type="button" onClick={onClose}>取消</button>
-              <button className="admin-primary" type="submit" disabled={saving}>{saving ? "保存中..." : "保存"}</button>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="category-modal-body" style={{ flex: 1, overflowY: "auto" }}>
-              <CategoryMarkupTab categoryId={category!.id} categoryName={category!.name} />
-            </div>
-            <div className="detail-actions">
-              <button className="admin-light" type="button" onClick={onClose}>关闭</button>
-            </div>
-          </>
-        )}
+          <div className="admin-modal-footer">
+            <button className="admin-light" type="button" onClick={onClose}>取消</button>
+            <button className="admin-primary" type="submit" disabled={saving}>{saving ? "保存中..." : "保存"}</button>
+          </div>
+        </>
       </form>
     </AdminModalBackdrop>
   );

@@ -1,23 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { getPool, initDb, formatDbDateTime } from "./init";
 import { createQuote, generateQuoteDocument, createCustomerAccessToken } from "./quotes";
-import { createCustomer } from "./customers";
 import { ensureContactConversation } from "./conversations";
+import { createSystemFollowup } from "./followups";
 import { listProductsFromDb } from "./products";
-import { listProductMarkupsFromDb } from "./markups";
+import { inferRegionFromPhone } from "@/lib/phone-region";
 import type {
-  ProductMarkup,
   QuoteLineItem,
+  SupportedCurrency,
   StorefrontCatalog,
   StorefrontInquiryInput,
   StorefrontInquiryResult,
   StorefrontMessageInput,
   StorefrontProduct,
-  StorefrontSku,
   StorefrontState,
   StorefrontStateInput,
 } from "./types";
-import type { ProductWithStatus } from "./types";
+import { SUPPORTED_CURRENCIES, type CategoryWithMeta, type ProductWithStatus } from "./types";
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
@@ -32,35 +31,104 @@ async function ensureStorefrontSession(sessionId?: string) {
   return id;
 }
 
-async function getExchangeRate(from: "CNY" | "USD", to: "CNY" | "USD") {
+const FALLBACK_CNY_RATES: Record<SupportedCurrency, number> = {
+  CNY: 1,
+  USD: 1 / 7.24,
+  EUR: 1 / 7.8,
+  GBP: 1 / 9.15,
+  JPY: 20.5,
+  AUD: 1 / 4.75,
+  CAD: 1 / 5.28
+};
+
+function normalizeSupportedCurrency(value: string | null | undefined, fallback: SupportedCurrency = "CNY"): SupportedCurrency {
+  const normalized = String(value ?? "").trim().toUpperCase();
+  return SUPPORTED_CURRENCIES.includes(normalized as SupportedCurrency) ? normalized as SupportedCurrency : fallback;
+}
+
+async function getDirectExchangeRate(from: SupportedCurrency, to: SupportedCurrency): Promise<number | null> {
   if (from === to) return 1;
   const result = await getPool().query<{ rate: string }>(
     `SELECT rate FROM exchange_rates
      WHERE currency_from = $1 AND currency_to = $2 AND status = 'active'
-     ORDER BY effective_at DESC
+     ORDER BY updated_at DESC, effective_at DESC
      LIMIT 1`,
     [from, to]
   );
   if (result.rows[0]) return Number(result.rows[0].rate);
-  if (from === "CNY" && to === "USD") return 1 / 7.24;
-  return 7.24;
+
+  const inverse = await getPool().query<{ rate: string }>(
+    `SELECT rate FROM exchange_rates
+     WHERE currency_from = $1 AND currency_to = $2 AND status = 'active'
+     ORDER BY updated_at DESC, effective_at DESC
+     LIMIT 1`,
+    [to, from]
+  );
+  const inverseRate = Number(inverse.rows[0]?.rate ?? 0);
+  if (inverseRate > 0) return Number((1 / inverseRate).toFixed(8));
+  return null;
 }
 
-function applyMarkupToPrice(price: number, markup?: ProductMarkup) {
-  if (!markup || markup.status === "unset" || markup.markupPercent <= 0) return Number(price.toFixed(4));
-  return Number((price * (1 + markup.markupPercent / 100)).toFixed(4));
+async function getExchangeRate(from: SupportedCurrency, to: SupportedCurrency): Promise<number> {
+  const direct = await getDirectExchangeRate(from, to);
+  if (direct !== null) return direct;
+
+  const fromToCny = from === "CNY" ? 1 : (await getDirectExchangeRate(from, "CNY") ?? 0);
+  const cnyToTarget = to === "CNY" ? 1 : (await getDirectExchangeRate("CNY", to) ?? 0);
+  if (fromToCny > 0 && cnyToTarget > 0) return Number((fromToCny * cnyToTarget).toFixed(8));
+
+  const fallbackFromToCny = from === "CNY" ? 1 : 1 / FALLBACK_CNY_RATES[from];
+  const fallbackCnyToTarget = to === "CNY" ? 1 : FALLBACK_CNY_RATES[to];
+  return Number((fallbackFromToCny * fallbackCnyToTarget).toFixed(8));
 }
 
-function productToStorefrontProduct(product: ProductWithStatus, markup?: ProductMarkup, currency: "CNY" | "USD" = "CNY", exchangeRate = 1): StorefrontProduct {
-  const markedBasePrice = applyMarkupToPrice(product.price, markup);
-  const basePrice = currency === "USD" ? Number((markedBasePrice * exchangeRate).toFixed(4)) : markedBasePrice;
+function applyProductMarkupToPrice(price: number, product: ProductWithStatus) {
+  const basePrice = Number(price || 0);
+  if (product.effectiveMarkupValue <= 0) return Number(basePrice.toFixed(4));
+  const finalPrice = product.effectiveMarkupType === "fixed"
+    ? basePrice + product.effectiveMarkupValue
+    : basePrice * (1 + product.effectiveMarkupValue / 100);
+  return Number(finalPrice.toFixed(4));
+}
+
+function categoryPathFor(categoryId: string, categoriesById: Map<string, CategoryWithMeta>) {
+  const path: CategoryWithMeta[] = [];
+  const seen = new Set<string>();
+  let current = categoriesById.get(categoryId);
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    path.unshift(current);
+    current = current.parentId ? categoriesById.get(current.parentId) : undefined;
+  }
+  return path;
+}
+
+function productToStorefrontProduct(
+  product: ProductWithStatus,
+  categoriesById: Map<string, CategoryWithMeta>,
+  exchangeRate = 1
+): StorefrontProduct {
+  const markedBasePrice = applyProductMarkupToPrice(product.price, product);
+  const basePrice = Number((markedBasePrice * exchangeRate).toFixed(4));
+  const categoryPath = categoryPathFor(product.categoryId, categoriesById);
+  const category = categoryPath.at(-1);
+  const categoryPathIds = categoryPath.length ? categoryPath.map((entry) => entry.id) : [product.categoryId];
+  const categoryPathName = categoryPath.length ? categoryPath.map((entry) => entry.name).join(" / ") : product.categoryId;
+  const categoryPathNameEn = categoryPath.length ? categoryPath.map((entry) => entry.nameEn || entry.name).join(" / ") : product.categoryId;
   return {
     id: product.id,
     offerId: product.id,
     name: product.name,
+    nameEn: product.nameEn,
     fullName: product.nameEn ? `${product.name} ${product.nameEn}` : product.name,
+    fullNameEn: product.nameEn || product.name,
     cat1: product.categoryId,
     cat2: product.material || product.categoryId,
+    categoryName: category?.name ?? product.categoryId,
+    categoryNameEn: category?.nameEn ?? category?.name ?? product.categoryId,
+    categoryPathIds,
+    categoryPathName,
+    categoryPathNameEn,
     image: product.image,
     link: product.sourceUrl,
     cbm: product.volumeM3,
@@ -80,18 +148,22 @@ function productToStorefrontProduct(product: ProductWithStatus, markup?: Product
         { name: "起订量", value: String(product.moq) },
         { name: "单件体积", value: `${product.volumeM3} m³` },
         { name: "单件重量", value: `${product.weightKg} kg` }
-      ],
-      packaging: {
+      ].concat(product.detailAttrs ?? []),
+      packaging: product.packaging ?? {
         headers: ["包装规格", "单件体积", "单件重量", "起订量"],
         rows: [[product.size, `${product.volumeM3} m³`, `${product.weightKg} kg`, `${product.moq} pcs`]]
       },
       options: product.specs.map((spec, index) => ({
         id: spec.id,
         image: spec.image ?? product.image,
-        price: currency === "USD" ? Number((applyMarkupToPrice(spec.price, markup) * exchangeRate).toFixed(4)) : applyMarkupToPrice(spec.price, markup),
-        skuColor: spec.label,
-        skuBody: product.size,
-        skuName: `${product.sku}-${index + 1}`
+        price: Number((applyProductMarkupToPrice(spec.price, product) * exchangeRate).toFixed(4)),
+        skuColor: spec.skuColor || spec.label,
+        skuBody: spec.skuBody || product.size,
+        skuName: spec.skuName || `${product.sku}-${index + 1}`,
+        rankPrice: spec.rankPrice == null ? null : Number((applyProductMarkupToPrice(spec.rankPrice, product) * exchangeRate).toFixed(4)),
+        priceStatus: spec.priceStatus,
+        imageMatch: spec.imageMatch,
+        imageSize: spec.imageSize
       }))
     }
   };
@@ -115,48 +187,67 @@ async function bindCustomerIdentities(customerId: string, input: { sessionId?: s
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-export async function listStorefrontProductsFromDb(currency: "CNY" | "USD" = "CNY"): Promise<StorefrontCatalog> {
+export async function listStorefrontProductsFromDb(currency: SupportedCurrency = "CNY"): Promise<StorefrontCatalog> {
   await initDb();
-  const { listCategoriesFromDb } = await import("./categories");
-  const [products, markups] = await Promise.all([listProductsFromDb(), listProductMarkupsFromDb()]);
+  const displayCurrency = normalizeSupportedCurrency(currency, "CNY");
+  const { listCategoriesDetailedFromDb } = await import("./categories");
+  const products = await listProductsFromDb();
   const activeProducts = products.filter((product) => product.status === "active");
-  const exchangeRate = currency === "USD" ? await getExchangeRate("CNY", "USD") : 1;
-  const markupByProduct = new Map(markups.map((markup) => [markup.productId, markup]));
-  const categoriesFromDb = await listCategoriesFromDb();
+  const exchangeRate = await getExchangeRate("CNY", displayCurrency);
+  const categoriesFromDb = await listCategoriesDetailedFromDb();
+  const categoriesById = new Map(categoriesFromDb.map((category) => [category.id, category]));
+  const productCategoryIds = new Set<string>();
+  const categoryCounts = new Map<string, number>();
+  for (const product of activeProducts) {
+    categoryPathFor(product.categoryId, categoriesById).forEach((category) => {
+      productCategoryIds.add(category.id);
+      categoryCounts.set(category.id, (categoryCounts.get(category.id) ?? 0) + 1);
+    });
+  }
   const categories = categoriesFromDb
-    .filter((category) => activeProducts.some((product) => product.categoryId === category.id))
-    .map((category) => ({ id: category.id, name: category.name, count: activeProducts.filter((product) => product.categoryId === category.id).length }));
+    .filter((category) => category.status === "active" && productCategoryIds.has(category.id))
+    .map((category) => ({
+      id: category.id,
+      name: category.name,
+      nameEn: category.nameEn,
+      count: categoryCounts.get(category.id) ?? 0,
+      parentId: category.parentId,
+      level: category.level,
+      sortOrder: category.sortOrder,
+      pathIds: categoryPathFor(category.id, categoriesById).map((entry) => entry.id)
+    }));
   return {
-    products: activeProducts.map((product) => productToStorefrontProduct(product, markupByProduct.get(product.id), currency, exchangeRate)),
+    products: activeProducts.map((product) => productToStorefrontProduct(product, categoriesById, exchangeRate)),
     categories
   };
 }
 
 export async function createStorefrontInquiry(input: StorefrontInquiryInput): Promise<StorefrontInquiryResult> {
   await initDb();
-  const currency = input.currency ?? "USD";
-  const exchangeRate = await getExchangeRate("CNY", "USD");
+  const inferred = inferRegionFromPhone(input.whatsapp);
+  const currency = normalizeSupportedCurrency(input.currency ?? inferred?.currency, "USD");
+  const exchangeRate = await getExchangeRate("CNY", currency);
+  const exchangeRateToCny = await getExchangeRate(currency, "CNY");
   const products = await listProductsFromDb();
-  const markups = await listProductMarkupsFromDb();
-  const markupByProduct = new Map(markups.map((markup) => [markup.productId, markup]));
   const items: QuoteLineItem[] = input.items.flatMap((item) => {
     const product = products.find((entry) => entry.id === item.offerId || entry.sku === item.offerId);
     if (!product) return [];
     const spec = product.specs[item.skuIndex] ?? product.specs[0];
     const quantity = Math.max(1, Number(item.quantity || product.moq || 1));
     const sourceUnitPriceCny = Number(spec?.price ?? product.price);
-    const markedPriceCny = applyMarkupToPrice(sourceUnitPriceCny, markupByProduct.get(product.id));
-    const unitPrice = currency === "USD" ? Number((markedPriceCny * exchangeRate).toFixed(4)) : markedPriceCny;
+    const markedPriceCny = applyProductMarkupToPrice(sourceUnitPriceCny, product);
+    const unitPrice = Number((markedPriceCny * exchangeRate).toFixed(4));
     return [{
       id: `qi-store-${randomUUID()}`,
       productId: product.id,
       name: product.name,
+      nameEn: product.nameEn || product.name,
       sku: spec?.id && spec.id !== "s1" ? `${product.sku}-${spec.id}` : product.sku,
       quantity,
       unitPrice,
       sourceUnitPriceCny,
       currency,
-      markupPercent: markupByProduct.get(product.id)?.markupPercent ?? 0,
+      markupPercent: product.markupPercent,
       amount: quantity * unitPrice,
       image: spec?.image ?? product.image
     }];
@@ -164,7 +255,7 @@ export async function createStorefrontInquiry(input: StorefrontInquiryInput): Pr
   if (!items.length) {
     throw new Error("Inquiry must include at least one valid product");
   }
-  const productAmount = input.totals?.productAmount ?? items.reduce((sum, item) => sum + item.amount, 0);
+  const productAmount = items.reduce((sum, item) => sum + item.amount, 0);
   const shippingFee = input.totals?.shippingFee ?? 0;
   const productOnlyInquiry = input.containerType === "Product Inquiry";
   const id = `QT-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${String(Math.floor(Math.random() * 900) + 100)}`;
@@ -181,7 +272,7 @@ export async function createStorefrontInquiry(input: StorefrontInquiryInput): Pr
     email: input.email || `${id.toLowerCase()}@customer.local`,
     containerType: input.containerType,
     currency,
-    exchangeRate: currency === "USD" ? 7.24 : 1,
+    exchangeRate: exchangeRateToCny,
     productAmount,
     shippingFee,
     localFee: productOnlyInquiry ? 0 : 320,
@@ -209,6 +300,15 @@ export async function createStorefrontInquiry(input: StorefrontInquiryInput): Pr
       quoteId: quote.id,
       channel: "whatsapp",
       initialMessage: `客户提交询盘 ${quote.quoteNo}，共 ${quote.productCount} 种产品。`
+    });
+    const itemSummary = quote.items.slice(0, 3).map((item) => `${item.name} x ${item.quantity}`).join("；");
+    await createSystemFollowup({
+      customerId,
+      quoteId: quote.id,
+      type: "产品咨询",
+      status: "跟进中",
+      owner: "前台询盘",
+      content: `前台询盘生成报价单 ${quote.quoteNo}，共 ${quote.productCount} 种产品，报价状态：${quote.status}。${itemSummary ? `产品：${itemSummary}${quote.items.length > 3 ? " 等" : ""}。` : ""}`
     });
   }
   const receipt = await generateQuoteDocument(quote.id, "inquiry_receipt", "system");
@@ -311,5 +411,25 @@ export async function createStorefrontMessage(input: StorefrontMessageInput): Pr
     channel: "site",
     initialMessage: input.message,
   });
+  const conversationResult = await getPool().query<{ customer_id: string | null }>(
+    "SELECT customer_id FROM conversations WHERE id = $1",
+    [conversationId]
+  );
+  const customerId = conversationResult.rows[0]?.customer_id ?? null;
+  if (customerId) {
+    await bindCustomerIdentities(customerId, {
+      sessionId: input.sessionId,
+      email: input.email,
+      whatsapp: input.whatsapp
+    });
+    await createSystemFollowup({
+      customerId,
+      quoteId: input.quoteId ?? null,
+      type: "客户跟进",
+      status: "跟进中",
+      owner: "联系我们",
+      content: `联系我们提交：${input.message}`
+    });
+  }
   return { conversationId };
 }

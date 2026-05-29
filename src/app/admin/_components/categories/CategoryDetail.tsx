@@ -1,9 +1,7 @@
 "use client";
 
 import { Edit3, Plus, X } from "lucide-react";
-import { useState } from "react";
 import { iconGlyph } from "../shared/utils";
-import { CategoryMarkupTab } from "../markups/CategoryMarkupTab";
 import type { CategoryWithMeta } from "./types";
 
 export function CategoryDetail({
@@ -27,7 +25,6 @@ export function CategoryDetail({
   onToggle: (category: CategoryWithMeta) => void;
   onClose?: () => void;
 }) {
-  const [tab, setTab] = useState<"info" | "markup">("info");
   const parent = category ? categories.find((entry) => entry.id === category.parentId) ?? null : null;
   const childCount = category ? categories.filter((entry) => entry.parentId === category.id).length : 0;
 
@@ -40,47 +37,43 @@ export function CategoryDetail({
             {onClose ? <button type="button" onClick={onClose}><X size={18} /></button> : <span>只读</span>}
           </div>
 
-          <div className="detail-tabs">
-            <button className={tab === "info" ? "active" : ""} onClick={() => setTab("info")}>基本信息</button>
-            <button className={tab === "markup" ? "active" : ""} onClick={() => setTab("markup")}>加价管理</button>
+          <div className="admin-detail-body">
+            <div className="category-preview">
+              <span>{iconGlyph(category.icon)}</span>
+              <strong>{category.name} <em>{category.nameEn}</em></strong>
+              <i>{category.status === "active" ? "启用" : "停用"}</i>
+            </div>
+            <h3>基本信息</h3>
+            <div className="detail-kv">
+              <span>中文名称</span><strong>{category.name}</strong>
+              <span>英文名称</span><strong>{category.nameEn}</strong>
+              <span>上级分类</span><strong>{parent?.name ?? "一级分类"}</strong>
+              <span>分类级别</span><strong><span className="level-pill">{category.level === 1 ? "一级" : category.level === 2 ? "二级" : "三级"}</span></strong>
+              <span>展示状态</span><strong><span className={category.status === "active" ? "status-pill active" : "status-pill"}>{category.status === "active" ? "启用" : "停用"}</span></strong>
+              <span>排序</span><strong>{category.sortOrder}</strong>
+            </div>
+            <div className="detail-stats">
+              <span>产品数量 <strong>{category.productCount}</strong></span>
+              <span>子分类 <strong>{childCount}</strong></span>
+            </div>
+            <h3>加价设置</h3>
+            <div className="detail-kv">
+              <span>分类加价</span><strong>{category.markupValue ? `${category.markupValue}${category.markupType === "percentage" ? "%" : ""}` : "-"}</strong>
+              <span>模式</span><strong>{category.markupType === "percentage" ? "百分比" : "固定数值"}</strong>
+            </div>
+            <h3>分类描述</h3>
+            <p className="category-readonly-text">{category.description || "暂无描述"}</p>
+            <h3>SEO设置</h3>
+            <div className="detail-kv">
+              <span>Meta 标题</span><strong>{category.metaTitle || "-"}</strong>
+              <span>Meta 描述</span><strong>{category.metaDescription || "-"}</strong>
+            </div>
           </div>
-
-          {tab === "info" ? (
-            <>
-              <div className="category-preview">
-                <span>{iconGlyph(category.icon)}</span>
-                <strong>{category.name} <em>{category.nameEn}</em></strong>
-                <i>{category.status === "active" ? "启用" : "停用"}</i>
-              </div>
-              <h3>基本信息</h3>
-              <div className="detail-kv">
-                <span>中文名称</span><strong>{category.name}</strong>
-                <span>英文名称</span><strong>{category.nameEn}</strong>
-                <span>上级分类</span><strong>{parent?.name ?? "一级分类"}</strong>
-                <span>分类级别</span><strong><span className="level-pill">{category.level === 1 ? "一级" : category.level === 2 ? "二级" : "三级"}</span></strong>
-                <span>展示状态</span><strong><span className={category.status === "active" ? "status-pill active" : "status-pill"}>{category.status === "active" ? "启用" : "停用"}</span></strong>
-                <span>排序</span><strong>{category.sortOrder}</strong>
-              </div>
-              <div className="detail-stats">
-                <span>产品数量 <strong>{category.productCount}</strong></span>
-                <span>子分类 <strong>{childCount}</strong></span>
-              </div>
-              <h3>分类描述</h3>
-              <p className="category-readonly-text">{category.description || "暂无描述"}</p>
-              <h3>SEO设置</h3>
-              <div className="detail-kv">
-                <span>Meta 标题</span><strong>{category.metaTitle || "-"}</strong>
-                <span>Meta 描述</span><strong>{category.metaDescription || "-"}</strong>
-              </div>
-              <div className="detail-actions">
-                <button className="admin-light" type="button" disabled={saving} onClick={() => void onToggle(category)}>{category.status === "active" ? "停用" : "启用"}</button>
-                <button className="admin-light" type="button" onClick={() => onCreateChild(category)}><Plus size={16} /> 添加子分类</button>
-                <button className="admin-primary" type="button" onClick={() => onEdit(category)}><Edit3 size={16} /> 编辑</button>
-              </div>
-            </>
-          ) : (
-            <CategoryMarkupTab categoryId={category.id} categoryName={category.name} />
-          )}
+          <div className="detail-actions">
+            <button className="admin-light" type="button" disabled={saving} onClick={() => void onToggle(category)}>{category.status === "active" ? "停用" : "启用"}</button>
+            <button className="admin-light" type="button" onClick={() => onCreateChild(category)}><Plus size={16} /> 添加子分类</button>
+            <button className="admin-primary" type="button" onClick={() => onEdit(category)}><Edit3 size={16} /> 编辑</button>
+          </div>
         </>
       ) : (
         <>

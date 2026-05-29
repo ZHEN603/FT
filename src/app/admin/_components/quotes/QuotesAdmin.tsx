@@ -3,7 +3,6 @@
 import {
   CalendarDays,
   CheckCircle2,
-  ChevronDown,
   ClipboardList,
   Clock,
   Edit3,
@@ -16,16 +15,18 @@ import {
   Send,
   Trash2
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AdminTop } from "../shared/AdminTop";
+import { FtSelect } from "../shared/FtSelect";
 import { PaginationFooter } from "../shared/PaginationFooter";
 import { SmallMetric } from "../shared/SmallMetric";
-import { countryFlag, formatDateTime } from "../shared/utils";
+import { appendDateRangeParams, countryFlag, defaultAdminDateRange, downloadAdminExport, formatDateTime } from "../shared/utils";
 import { useAutoDismissMessage, usePagination } from "../shared/hooks";
+import { CurrencySelect, useAdminCurrency } from "../shared/currency";
 import { QuoteDetail } from "./QuoteDetail";
 import { QuoteEditorModal } from "./QuoteEditorModal";
 import { QuoteKanbanBoard } from "./QuoteKanbanBoard";
-import { usd } from "@/components/shared";
+import { QUOTE_STATUS_OPTIONS, quoteStatusColor } from "./status";
 import type { Quote } from "@/lib/types";
 import type { QuoteMetrics, QuoteWithItems } from "./types";
 
@@ -36,21 +37,23 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
   const [query, setQuery] = useState("");
   const [countryFilter, setCountryFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [containerFilter, setContainerFilter] = useState("all");
+  const [{ startDate: defaultStartDate, endDate: defaultEndDate }] = useState(defaultAdminDateRange);
+  const [startDate, setStartDate] = useState(defaultStartDate);
+  const [endDate, setEndDate] = useState(defaultEndDate);
   const [editing, setEditing] = useState<QuoteWithItems | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [selectedQuoteIds, setSelectedQuoteIds] = useState<Set<string>>(new Set());
   const [viewMode, setViewMode] = useState<"list" | "kanban">("list");
   const [message, setMessage] = useAutoDismissMessage();
+  const money = useAdminCurrency("USD");
   const selected = quotes.find((quote) => quote.id === selectedId) ?? quotes[0] ?? null;
   const visibleQuotes = quotes.filter((quote) => {
     const keyword = query.trim().toLowerCase();
     const matchQuery = !keyword || `${quote.quoteNo} ${quote.company} ${quote.customerName} ${quote.whatsapp}`.toLowerCase().includes(keyword);
     const matchCountry = countryFilter === "all" || quote.country === countryFilter;
     const matchStatus = statusFilter === "all" || quote.status === statusFilter;
-    const matchContainer = containerFilter === "all" || quote.containerType === containerFilter;
-    return matchQuery && matchCountry && matchStatus && matchContainer;
+    return matchQuery && matchCountry && matchStatus;
   });
   const filteredMetrics = {
     total: visibleQuotes.length,
@@ -59,15 +62,15 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
     closed: visibleQuotes.filter((quote) => quote.status === "已成交").length,
     amount: visibleQuotes.reduce((sum, quote) => sum + quote.totalAmount, 0)
   };
-  const pagination = usePagination(visibleQuotes, `${query}|${countryFilter}|${statusFilter}|${containerFilter}`);
+  const pagination = usePagination(visibleQuotes, `${query}|${countryFilter}|${statusFilter}|${startDate}|${endDate}`);
   const currentQuotePageIds = pagination.pageItems.map((quote) => quote.id);
   const allQuotesSelected = currentQuotePageIds.length > 0 && currentQuotePageIds.every((id) => selectedQuoteIds.has(id));
   const countries = Array.from(new Set(quotes.map((quote) => quote.country)));
-  const containers = Array.from(new Set(quotes.map((quote) => quote.containerType)));
 
-  async function loadQuotesFromApi() {
+  const loadQuotesFromApi = useCallback(async function loadQuotesFromApi() {
     setLoading(true);
-    await fetch("/api/admin/quotes")
+    const params = appendDateRangeParams(new URLSearchParams(), startDate, endDate);
+    await fetch(`/api/admin/quotes?${params.toString()}`)
       .then((response) => response.json())
       .then((data: { quotes: QuoteWithItems[]; metrics: QuoteMetrics }) => {
         setQuotes(data.quotes);
@@ -76,14 +79,14 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
         setSelectedQuoteIds(new Set());
       })
       .finally(() => setLoading(false));
-  }
+  }, [endDate, startDate]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void loadQuotesFromApi();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [loadQuotesFromApi]);
 
   async function updateQuoteStatus(quote: QuoteWithItems, status: Quote["status"]) {
     const response = await fetch("/api/admin/quotes", {
@@ -111,9 +114,12 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
       country: form.country,
       port: form.destinationPort,
       destinationPort: form.destinationPort,
+      preferredLanguage: form.preferredLanguage,
       whatsapp: form.whatsapp,
       email: form.email,
       containerType: form.containerType,
+      currency: form.currency,
+      exchangeRate: money.rateMap.get(`${form.currency}:CNY`) ?? (form.currency === "CNY" ? 1 : editing.exchangeRate ?? 1),
       status: form.status,
       productAmount: Number(form.productAmount),
       shippingFee: Number(form.shippingFee),
@@ -130,6 +136,7 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
         ...item,
         quantity: Math.max(1, Number(item.quantity || 1)),
         unitPrice: Number(item.unitPrice || 0),
+        currency: form.currency,
         amount: Math.max(1, Number(item.quantity || 1)) * Number(item.unitPrice || 0)
       }))
     };
@@ -214,9 +221,12 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
       country: "美国",
       port: "洛杉矶港",
       destinationPort: "洛杉矶港",
+      preferredLanguage: "en",
       whatsapp: "",
       email: "",
       containerType: "40GP",
+      currency: money.currency,
+      exchangeRate: money.rateMap.get(`${money.currency}:CNY`) ?? 1,
       productCount: 0,
       totalProducts: 0,
       productAmount: 0,
@@ -240,7 +250,8 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
     setQuery("");
     setCountryFilter("all");
     setStatusFilter("all");
-    setContainerFilter("all");
+    setStartDate(defaultStartDate);
+    setEndDate(defaultEndDate);
   }
 
   const viewModeControl = (
@@ -257,7 +268,13 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
   return (
     <>
       <AdminTop title="报价单管理" subtitle="统一管理客户报价单，支持查看详情、生成PDF、WhatsApp发送与成交跟进">
-        <button className="admin-light">2026-05-01 ~ 2026-05-24 <CalendarDays size={18} /></button>
+        <CurrencySelect value={money.currency} onChange={(value) => money.setCurrency(value)} />
+        <label className="date-range-control">
+          <CalendarDays size={16} />
+          <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+          <span>~</span>
+          <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+        </label>
         <button className="admin-light" onClick={() => void loadQuotesFromApi()}><RefreshCw size={18} /> 刷新</button>
         <button className="admin-primary" onClick={openCreateQuote}><Plus size={18} /> 新建报价单</button>
       </AdminTop>
@@ -267,7 +284,7 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
         <SmallMetric label="待处理报价单" value={String(filteredMetrics.pending)} icon={Clock} />
         <SmallMetric label="已发送报价单" value={String(filteredMetrics.sent)} icon={Send} green />
         <SmallMetric label="已成交报价单" value={String(filteredMetrics.closed)} icon={CheckCircle2} purple />
-        <SmallMetric label="报价总金额" value={usd.format(filteredMetrics.amount || metrics.amount)} icon={ClipboardList} green />
+        <SmallMetric label="报价总金额" value={money.format(filteredMetrics.amount || metrics.amount, "USD")} icon={ClipboardList} green />
       </div>
 
       {viewMode === "kanban" ? (
@@ -280,25 +297,29 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
           onEdit={setEditing}
           onChat={(quote) => onOpenConversation({ whatsapp: quote.whatsapp, quoteId: quote.id })}
           toolbarSlot={viewModeControl}
+          displayCurrency={money.currency}
+          rateMap={money.rateMap}
         />
       ) : (
         <div className="quote-admin-grid">
           <section className="admin-panel">
             <div className="admin-filters">
-              <label><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索客户 / 报价单编号 / WhatsApp" /></label>
               {viewModeControl}
-              <select value={countryFilter} onChange={(event) => setCountryFilter(event.target.value)}><option value="all">国家/地区</option>{countries.map((country) => <option key={country} value={country}>{country}</option>)}</select>
-              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">报价状态</option><option>新询价</option><option>跟进中</option><option>已报价</option><option>已成交</option><option>已关闭</option></select>
-              <button onClick={resetFilters}>时间筛选 <ChevronDown size={16} /></button>
-              <select value={containerFilter} onChange={(event) => setContainerFilter(event.target.value)}><option value="all">集装箱类型</option>{containers.map((container) => <option key={container} value={container}>{container}</option>)}</select>
-              <button>导出报价单</button>
+              <label><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索客户 / 报价单编号 / WhatsApp" /></label>
+              <FtSelect value={countryFilter} options={[{ value: "all", label: "国家/地区" }, ...countries.map((country) => ({ value: country, label: country }))]} onChange={setCountryFilter} />
+              <FtSelect value={statusFilter} options={[{ value: "all", label: "报价状态" }, ...QUOTE_STATUS_OPTIONS]} onChange={setStatusFilter} />
+              <button onClick={resetFilters}><RefreshCw size={16} /> 重置</button>
+              <button onClick={() => downloadAdminExport("quotes")}>导出报价单</button>
             </div>
             <div className="bulk-bar">
               <span>已选 <strong>{selectedQuoteIds.size}</strong> 份</span>
-              <select disabled={selectedQuoteIds.size === 0} onChange={(event) => { if (event.target.value) void bulkUpdateQuoteStatus(event.target.value as Quote["status"]); event.currentTarget.value = ""; }} defaultValue="">
-                <option value="">批量状态</option>
-                <option>新询价</option><option>跟进中</option><option>已报价</option><option>已成交</option><option>已关闭</option>
-              </select>
+              <FtSelect
+                className="bulk-status-select"
+                disabled={selectedQuoteIds.size === 0}
+                value=""
+                options={[{ value: "", label: "批量状态" }, ...QUOTE_STATUS_OPTIONS]}
+                onChange={(value) => { if (value) void bulkUpdateQuoteStatus(value as Quote["status"]); }}
+              />
               <button className="danger-action" disabled={selectedQuoteIds.size === 0} onClick={() => void bulkRemoveQuotes()}>批量删除</button>
             </div>
             <div className="admin-table-scroll">
@@ -327,14 +348,17 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
                     </td>
                     <td>{quote.productCount} 种产品</td>
                     <td>{quote.containerType}</td>
-                    <td>{usd.format(quote.productAmount)}</td>
-                    <td>{usd.format(quote.shippingFee)}</td>
-                    <td><strong>{usd.format(quote.totalAmount)}</strong></td>
+                    <td>{money.format(quote.productAmount, quote.currency ?? "USD")}</td>
+                    <td>{money.format(quote.shippingFee, quote.currency ?? "USD")}</td>
+                    <td><strong>{money.format(quote.totalAmount, quote.currency ?? "USD")}</strong></td>
                     <td>{quote.createdAt}</td>
-                    <td className="sticky-status-col">
-                      <select value={quote.status} onClick={(event) => event.stopPropagation()} onChange={(event) => void updateQuoteStatus(quote, event.target.value as Quote["status"])}>
-                        <option>新询价</option><option>跟进中</option><option>已报价</option><option>已成交</option><option>已关闭</option>
-                      </select>
+                    <td className="sticky-status-col" onClick={(event) => event.stopPropagation()}>
+                      <FtSelect
+                        className={`table-status-select quote-status-select status-${quoteStatusColor(quote.status)}`}
+                        value={quote.status}
+                        options={QUOTE_STATUS_OPTIONS}
+                        onChange={(value) => void updateQuoteStatus(quote, value as Quote["status"])}
+                      />
                     </td>
                     <td className="row-actions sticky-actions-col">
                       <button title="编辑" aria-label="编辑报价单" onClick={(event) => { event.stopPropagation(); setEditing(quote); }}><Edit3 size={16} /></button>
@@ -354,7 +378,7 @@ export function QuotesAdmin({ onOpenConversation }: { onOpenConversation: (targe
               onPageSizeChange={pagination.setPageSize}
             />
           </section>
-          {selected && <QuoteDetail quote={selected} onChanged={loadQuotesFromApi} onMessage={setMessage} />}
+          {selected && <QuoteDetail quote={selected} displayCurrency={money.currency} rateMap={money.rateMap} onChanged={loadQuotesFromApi} onMessage={setMessage} />}
         </div>
       )}
       {editing && <QuoteEditorModal quote={editing} saving={saving} onClose={() => setEditing(null)} onSubmit={saveQuote} />}

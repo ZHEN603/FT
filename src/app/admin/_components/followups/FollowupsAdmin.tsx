@@ -7,24 +7,26 @@ import {
   Clock,
   Download,
   Edit3,
+  MessageCircle,
   Plus,
   RefreshCw,
   Search,
   Trash2,
   TrendingUp
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AdminTop } from "../shared/AdminTop";
+import { FtSelect } from "../shared/FtSelect";
 import { PaginationFooter } from "../shared/PaginationFooter";
 import { SmallMetric } from "../shared/SmallMetric";
-import { countryFlag, toDateTimeLocal } from "../shared/utils";
+import { appendDateRangeParams, countryFlag, defaultAdminDateRange, downloadAdminExport, toDateTimeLocal } from "../shared/utils";
 import { useAutoDismissMessage, usePagination } from "../shared/hooks";
 import { FollowupDetail } from "./FollowupDetail";
 import { FollowupEditorModal, emptyFollowup, followupStatuses, followupTypeClass, followupTypes } from "./FollowupEditorModal";
 import type { CustomerWithStats } from "../customers/types";
 import type { FollowupFormState, FollowupMetrics, FollowupQuoteOption, FollowupRecord, FollowupStatus } from "./types";
 
-export function FollowupsAdmin() {
+export function FollowupsAdmin({ onOpenConversation }: { onOpenConversation: (target?: { whatsapp?: string; quoteId?: string }) => void }) {
   const [followups, setFollowups] = useState<FollowupRecord[]>([]);
   const [customers, setCustomers] = useState<CustomerWithStats[]>([]);
   const [quotes, setQuotes] = useState<FollowupQuoteOption[]>([]);
@@ -33,8 +35,9 @@ export function FollowupsAdmin() {
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [ownerFilter, setOwnerFilter] = useState("all");
-  const [startDate, setStartDate] = useState("2026-05-01");
-  const [endDate, setEndDate] = useState("2026-05-24");
+  const [{ startDate: defaultStartDate, endDate: defaultEndDate }] = useState(defaultAdminDateRange);
+  const [startDate, setStartDate] = useState(defaultStartDate);
+  const [endDate, setEndDate] = useState(defaultEndDate);
   const [editing, setEditing] = useState<FollowupRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -49,10 +52,7 @@ export function FollowupsAdmin() {
     const matchType = typeFilter === "all" || item.type === typeFilter;
     const matchStatus = statusFilter === "all" || item.status === statusFilter;
     const matchOwner = ownerFilter === "all" || item.owner === ownerFilter;
-    const day = item.createdAt.slice(0, 10);
-    const matchStart = !startDate || day >= startDate;
-    const matchEnd = !endDate || day <= endDate;
-    return matchQuery && matchType && matchStatus && matchOwner && matchStart && matchEnd;
+    return matchQuery && matchType && matchStatus && matchOwner;
   });
   const filteredMetrics: FollowupMetrics = {
     total: visibleFollowups.length,
@@ -69,9 +69,10 @@ export function FollowupsAdmin() {
   const currentFollowupPageIds = pagination.pageItems.map((followup) => followup.id);
   const allFollowupsSelected = currentFollowupPageIds.length > 0 && currentFollowupPageIds.every((id) => selectedFollowupIds.has(id));
 
-  async function loadFollowups() {
+  const loadFollowups = useCallback(async function loadFollowups() {
     setLoading(true);
-    await fetch("/api/admin/followups")
+    const params = appendDateRangeParams(new URLSearchParams(), startDate, endDate);
+    await fetch(`/api/admin/followups?${params.toString()}`)
       .then((response) => response.json())
       .then((data: { followups: FollowupRecord[]; customers: CustomerWithStats[]; quotes: FollowupQuoteOption[]; metrics: FollowupMetrics }) => {
         setFollowups(data.followups);
@@ -81,14 +82,14 @@ export function FollowupsAdmin() {
         setSelectedFollowupIds(new Set());
       })
       .finally(() => setLoading(false));
-  }
+  }, [endDate, startDate]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void loadFollowups();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [loadFollowups]);
 
   async function saveFollowup(form: FollowupFormState) {
     setSaving(true);
@@ -185,14 +186,13 @@ export function FollowupsAdmin() {
     setTypeFilter("all");
     setStatusFilter("all");
     setOwnerFilter("all");
-    setStartDate("2026-05-01");
-    setEndDate("2026-05-24");
+    setStartDate(defaultStartDate);
+    setEndDate(defaultEndDate);
   }
 
   return (
     <>
       <AdminTop title="跟进记录" subtitle="管理客户跟进记录，记录沟通历史，把握跟进进度，提高成交率">
-        <label className="top-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索客户名称、联系人、WhatsApp、报价单号..." /></label>
         <label className="date-range-control"><input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /><span>~</span><input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label>
         <button className="admin-light" onClick={resetFilters}><RefreshCw size={16} /> 筛选</button>
         <button className="admin-primary" onClick={() => setEditing(emptyFollowup(customers[0]?.id ?? ""))}><Plus size={18} /> 新建跟进记录</button>
@@ -209,19 +209,21 @@ export function FollowupsAdmin() {
         <section className="admin-panel">
           <div className="admin-filters">
             <label><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索客户名称、联系人、WhatsApp..." /></label>
-            <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}><option value="all">跟进类型</option>{followupTypes.map((type) => <option key={type}>{type}</option>)}</select>
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">跟进状态</option>{followupStatuses.map((status) => <option key={status}>{status}</option>)}</select>
-            <select value={ownerFilter} onChange={(event) => setOwnerFilter(event.target.value)}><option value="all">所有负责人</option>{owners.map((owner) => <option key={owner}>{owner}</option>)}</select>
-            <label className="inline-date-range"><input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /><span>~</span><input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label>
+            <FtSelect value={typeFilter} options={[{ value: "all", label: "跟进类型" }, ...followupTypes.map((type) => ({ value: type, label: type }))]} onChange={setTypeFilter} />
+            <FtSelect value={statusFilter} options={[{ value: "all", label: "跟进状态" }, ...followupStatuses.map((status) => ({ value: status, label: status }))]} onChange={setStatusFilter} />
+            <FtSelect value={ownerFilter} options={[{ value: "all", label: "所有负责人" }, ...owners.map((owner) => ({ value: owner, label: owner }))]} onChange={setOwnerFilter} />
             <button onClick={resetFilters}><RefreshCw size={16} /> 重置</button>
-            <button><Download size={16} /> 导出</button>
+            <button onClick={() => downloadAdminExport("followups")}><Download size={16} /> 导出</button>
           </div>
           <div className="bulk-bar">
             <span>已选 <strong>{selectedFollowupIds.size}</strong> 条</span>
-            <select disabled={selectedFollowupIds.size === 0} onChange={(event) => { if (event.target.value) void bulkUpdateFollowupStatus(event.target.value as FollowupStatus); event.currentTarget.value = ""; }} defaultValue="">
-              <option value="">批量状态</option>
-              <option>跟进中</option><option>已成交</option><option>暂缓跟进</option>
-            </select>
+            <FtSelect
+              className="bulk-status-select"
+              disabled={selectedFollowupIds.size === 0}
+              value=""
+              options={[{ value: "", label: "批量状态" }, ...followupStatuses.map((status) => ({ value: status, label: status }))]}
+              onChange={(value) => { if (value) void bulkUpdateFollowupStatus(value as FollowupStatus); }}
+            />
             <button className="danger-action" disabled={selectedFollowupIds.size === 0} onClick={() => void bulkRemoveFollowups()}>批量删除</button>
           </div>
           <div className="admin-table-scroll">
@@ -236,7 +238,20 @@ export function FollowupsAdmin() {
                   <td>
                     <div className="followup-customer-cell">
                       <span className="country-avatar">{countryFlag(followup.country)}</span>
-                      <div><strong>{followup.company}</strong><span>{followup.contactName}</span><span>{followup.whatsapp}</span></div>
+                      <div>
+                        <strong>{followup.company}</strong>
+                        <span>{followup.contactName}</span>
+                        <button
+                          className="quote-contact-button followup-contact-button"
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onOpenConversation({ whatsapp: followup.whatsapp, quoteId: followup.quoteId ?? undefined });
+                          }}
+                        >
+                          <MessageCircle size={15} /> {followup.whatsapp || "未留 WhatsApp"}
+                        </button>
+                      </div>
                     </div>
                   </td>
                   <td><strong>{followup.content}</strong><span>报价单：{followup.quoteNo ?? "-"}</span></td>
@@ -263,7 +278,15 @@ export function FollowupsAdmin() {
             onPageSizeChange={pagination.setPageSize}
           />
         </section>
-        {selected && <FollowupDetail followup={selected} onEdit={setEditing} onClose={markClosed} onCreate={() => setEditing(emptyFollowup(selected.customerId, selected.quoteId ?? ""))} />}
+        {selected && (
+          <FollowupDetail
+            followup={selected}
+            onEdit={setEditing}
+            onClose={markClosed}
+            onCreate={() => setEditing(emptyFollowup(selected.customerId, selected.quoteId ?? ""))}
+            onOpenConversation={onOpenConversation}
+          />
+        )}
       </div>
       {editing && <FollowupEditorModal followup={editing} customers={customers} quotes={quotes} saving={saving} onClose={() => setEditing(null)} onSubmit={saveFollowup} />}
     </>

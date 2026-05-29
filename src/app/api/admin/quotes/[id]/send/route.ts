@@ -3,9 +3,9 @@ import { createQuoteSendRecord } from "@/lib/db";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const input = await request.json().catch(() => ({})) as { documentId?: string | null };
+  const input = await request.json().catch(() => ({})) as { documentId?: string | null; mode?: "quote" | "deal" };
   try {
-    const record = await createQuoteSendRecord(id, input.documentId ?? null);
+    const record = await createQuoteSendRecord(id, input.documentId ?? null, input.mode === "deal" ? "deal" : "quote");
     return NextResponse.json({ record }, { status: 201 });
   } catch (error) {
     return NextResponse.json(

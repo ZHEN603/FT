@@ -3,6 +3,7 @@
 import { X } from "lucide-react";
 import { useState } from "react";
 import { AdminModalBackdrop } from "../shared/AdminModalBackdrop";
+import { FtSelect } from "../shared/FtSelect";
 import type { Supplier, SupplierBusinessModel, SupplierFormState, SupplierShopType, SupplierStatus } from "./types";
 
 export const supplierBusinessModels: SupplierBusinessModel[] = ["生产厂家", "贸易公司", "源头工厂"];
@@ -106,8 +107,8 @@ export function SupplierEditorModal({
             <div className="quote-info-grid">
               <label>供应商名称<input required value={form.name} onChange={(event) => update("name", event.target.value)} /></label>
               <label>图片地址<input value={form.image} onChange={(event) => update("image", event.target.value)} /></label>
-              <label>经营模式<select value={form.businessModel} onChange={(event) => update("businessModel", event.target.value as SupplierBusinessModel)}>{supplierBusinessModels.map((item) => <option key={item}>{item}</option>)}</select></label>
-              <label>店铺类型<select value={form.shopType} onChange={(event) => update("shopType", event.target.value as SupplierShopType)}>{supplierShopTypes.map((item) => <option key={item}>{item}</option>)}</select></label>
+              <label>经营模式<FtSelect value={form.businessModel} options={supplierBusinessModels.map((item) => ({ value: item, label: item }))} onChange={(value) => update("businessModel", value as SupplierBusinessModel)} /></label>
+              <label>店铺类型<FtSelect value={form.shopType} options={supplierShopTypes.map((item) => ({ value: item, label: item }))} onChange={(value) => update("shopType", value as SupplierShopType)} /></label>
               <label>省份<input value={form.region} onChange={(event) => update("region", event.target.value)} /></label>
               <label>城市<input value={form.city} onChange={(event) => update("city", event.target.value)} /></label>
               <label>详细地址<input value={form.address} onChange={(event) => update("address", event.target.value)} /></label>
@@ -128,7 +129,7 @@ export function SupplierEditorModal({
               <label>发货天数<input type="number" value={form.shipmentDays} onChange={(event) => update("shipmentDays", event.target.value)} /></label>
               <label>质量评分<input type="number" step="0.1" value={form.qualityScore} onChange={(event) => update("qualityScore", event.target.value)} /></label>
               <label>合作次数<input type="number" value={form.cooperationCount} onChange={(event) => update("cooperationCount", event.target.value)} /></label>
-              <label>状态<select value={form.status} onChange={(event) => update("status", event.target.value as SupplierStatus)}><option value="active">启用</option><option value="inactive">停用</option></select></label>
+              <label>状态<FtSelect value={form.status} options={[{ value: "active", label: "启用" }, { value: "inactive", label: "停用" }]} onChange={(value) => update("status", value as SupplierStatus)} /></label>
             </div>
           </section>
           <section className="quote-modal-card full">

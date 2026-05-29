@@ -1,6 +1,7 @@
 "use client";
 
 import type { QuoteWithItems } from "../quotes/types";
+import type { SupportedCurrency } from "@/lib/db";
 
 export type CustomerStatus = "活跃" | "跟进中" | "潜在" | "失效";
 export type CustomerGroup = "重要客户" | "普通客户" | "潜在客户";
@@ -12,6 +13,9 @@ export type CustomerWithStats = {
   contactName: string;
   country: string;
   destinationPort: string;
+  preferredLanguage: string;
+  preferredCurrency: SupportedCurrency;
+  isVisitor: boolean;
   whatsapp: string;
   email: string;
   group: CustomerGroup;
@@ -34,6 +38,8 @@ export type CustomerFormState = {
   contactName: string;
   country: string;
   destinationPort: string;
+  preferredLanguage: string;
+  preferredCurrency: SupportedCurrency;
   whatsapp: string;
   email: string;
   group: CustomerGroup;

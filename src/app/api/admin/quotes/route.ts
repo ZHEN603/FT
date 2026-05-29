@@ -9,7 +9,10 @@ export async function GET(request: Request) {
     const quotes = await listQuotesByCustomer(customerId);
     return NextResponse.json({ quotes });
   }
-  const quotes = await listQuotesFromDb();
+  const quotes = await listQuotesFromDb({
+    startDate: searchParams.get("startDate"),
+    endDate: searchParams.get("endDate")
+  });
   return NextResponse.json({
     quotes,
     metrics: {

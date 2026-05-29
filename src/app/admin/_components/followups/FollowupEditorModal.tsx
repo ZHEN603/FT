@@ -3,6 +3,7 @@
 import { X } from "lucide-react";
 import { useState } from "react";
 import { AdminModalBackdrop } from "../shared/AdminModalBackdrop";
+import { FtSelect } from "../shared/FtSelect";
 import { toDateTimeLocal } from "../shared/utils";
 import type { CustomerWithStats } from "../customers/types";
 import type { FollowupFormState, FollowupQuoteOption, FollowupRecord, FollowupStatus, FollowupType } from "./types";
@@ -91,15 +92,15 @@ export function FollowupEditorModal({
           <section className="quote-modal-card full">
             <h3>1. 客户与报价单</h3>
             <div className="quote-info-grid">
-              <label>客户<select required value={form.customerId} onChange={(event) => update("customerId", event.target.value)}><option value="">请选择客户</option>{customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.company} / {customer.contactName}</option>)}</select></label>
-              <label>报价单<select value={form.quoteId} onChange={(event) => update("quoteId", event.target.value)}><option value="">不关联报价单</option>{customerQuotes.map((quote) => <option key={quote.id} value={quote.id}>{quote.quoteNo}</option>)}</select></label>
+              <label>客户<FtSelect value={form.customerId} options={[{ value: "", label: "请选择客户" }, ...customers.map((customer) => ({ value: customer.id, label: `${customer.company} / ${customer.contactName}` }))]} onChange={(value) => update("customerId", value)} /></label>
+              <label>报价单<FtSelect value={form.quoteId} options={[{ value: "", label: "不关联报价单" }, ...customerQuotes.map((quote) => ({ value: quote.id, label: quote.quoteNo }))]} onChange={(value) => update("quoteId", value)} /></label>
             </div>
           </section>
           <section className="quote-modal-card full">
             <h3>2. 跟进信息</h3>
             <div className="quote-info-grid">
-              <label>跟进类型<select value={form.type} onChange={(event) => update("type", event.target.value as FollowupType)}>{followupTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
-              <label>跟进状态<select value={form.status} onChange={(event) => update("status", event.target.value as FollowupStatus)}>{followupStatuses.map((status) => <option key={status}>{status}</option>)}</select></label>
+              <label>跟进类型<FtSelect value={form.type} options={followupTypes.map((type) => ({ value: type, label: type }))} onChange={(value) => update("type", value as FollowupType)} /></label>
+              <label>跟进状态<FtSelect value={form.status} options={followupStatuses.map((status) => ({ value: status, label: status }))} onChange={(value) => update("status", value as FollowupStatus)} /></label>
               <label>跟进人<input value={form.owner} onChange={(event) => update("owner", event.target.value)} /></label>
               <label>下次跟进时间<input type="datetime-local" value={form.nextFollowUpAt} onChange={(event) => update("nextFollowUpAt", event.target.value)} /></label>
             </div>
@@ -111,7 +112,7 @@ export function FollowupEditorModal({
         </div>
         <div className="quote-modal-actions">
           <button className="admin-light" type="button" onClick={onClose}>取消</button>
-          <button className="admin-primary" type="submit" disabled={saving}>{saving ? "保存中..." : "保存记录"}</button>
+          <button className="admin-primary" type="submit" disabled={saving || !form.customerId}>{saving ? "保存中..." : "保存记录"}</button>
         </div>
       </form>
     </AdminModalBackdrop>

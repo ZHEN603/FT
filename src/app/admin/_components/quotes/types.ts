@@ -1,16 +1,18 @@
 "use client";
 
 import type { Quote } from "@/lib/types";
+import type { SupportedCurrency } from "@/lib/db";
 
 export type QuoteLineItem = {
   id: string;
   productId: string | null;
   name: string;
+  nameEn?: string | null;
   sku: string;
   quantity: number;
   unitPrice: number;
   sourceUnitPriceCny?: number | null;
-  currency?: "CNY" | "USD";
+  currency?: SupportedCurrency;
   markupPercent?: number;
   amount: number;
   image?: string | null;
@@ -20,6 +22,7 @@ export type QuoteWithItems = Quote & {
   quoteNo: string;
   contactName: string;
   destinationPort: string;
+  preferredLanguage: string;
   loadedVolumeM3: number;
   maxVolumeM3: number;
   currentWeightKg: number;
@@ -28,6 +31,8 @@ export type QuoteWithItems = Quote & {
   documentFee: number;
   customsFee: number;
   insuranceFee: number;
+  currency?: SupportedCurrency;
+  exchangeRate?: number;
   items: QuoteLineItem[];
 };
 
@@ -41,9 +46,11 @@ export type QuoteFormState = {
   contactName: string;
   country: string;
   destinationPort: string;
+  preferredLanguage: string;
   whatsapp: string;
   email: string;
   containerType: string;
+  currency: SupportedCurrency;
   status: Quote["status"];
   productAmount: string;
   shippingFee: string;

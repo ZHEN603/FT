@@ -45,9 +45,9 @@ export function AdminTop({ title, subtitle, children }: { title: string; subtitl
   }, []);
 
   function openNotification(item: AdminNotification) {
-    if (item.quoteId) {
-      navigate("quotes");
-      openConversations({ whatsapp: item.whatsapp, quoteId: item.quoteId });
+    if (item.whatsapp || item.quoteId) {
+      if (item.quoteId) navigate("quotes");
+      openConversations({ whatsapp: item.whatsapp, quoteId: item.quoteId ?? undefined });
     }
     setOpen(false);
   }

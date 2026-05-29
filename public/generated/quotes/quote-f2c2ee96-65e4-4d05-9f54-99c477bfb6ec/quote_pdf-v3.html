@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Quotation QT-20260529-174</title>
+  <style>
+    body{font-family:Arial,sans-serif;color:#111827;margin:40px}
+    h1{color:#ef0018;margin-bottom:4px}
+    body.lang-zh [data-lang="en"],body.lang-en [data-lang="zh"]{display:none!important}
+    .doc-toolbar{display:flex;justify-content:flex-end;gap:8px;margin-bottom:18px}
+    .doc-toolbar button{height:32px;padding:0 12px;border:1px solid #dbe3ef;border-radius:6px;background:#fff;color:#334155;font-weight:700;cursor:pointer}
+    body.lang-zh .doc-toolbar button[data-switch="zh"],body.lang-en .doc-toolbar button[data-switch="en"]{border-color:#ef0018;color:#ef0018;background:#fff1f2}
+    .muted{color:#66758d}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:24px 0}
+    .box{border:1px solid #e5e7eb;border-radius:8px;padding:14px}
+    table{width:100%;border-collapse:collapse;margin-top:20px}
+    th,td{border:1px solid #e5e7eb;padding:10px;text-align:left}
+    th{background:#f8fafc}
+    .product-cell{display:flex;align-items:center;gap:10px;min-width:220px}
+    .product-image{width:54px;height:54px;object-fit:cover;border:1px solid #dbe3ef;border-radius:6px;background:#f8fafc;flex:0 0 auto}
+    .product-image-placeholder{display:grid;place-items:center;width:54px;height:54px;border:1px dashed #cbd5e1;border-radius:6px;color:#94a3b8;background:#f8fafc;font-size:10px;font-weight:700;flex:0 0 auto}
+    .product-name{font-weight:700;line-height:1.35}
+    .total{margin-top:20px;text-align:right;font-size:20px;font-weight:800}
+    .hash{margin-top:28px;font-size:12px;color:#66758d}
+  </style>
+</head>
+<body class="lang-en">
+  <div class="doc-toolbar"><button type="button" data-switch="en">EN</button><button type="button" data-switch="zh">中文</button></div>
+  <h1><span data-lang="zh">报价单</span><span data-lang="en">Quotation</span></h1>
+  <div class="muted"><span data-lang="zh">单号</span><span data-lang="en">Quote No</span>: QT-20260529-174 · <span data-lang="zh">版本</span><span data-lang="en">Version</span> 3 · <span data-lang="zh">生成时间</span><span data-lang="en">Generated</span> 2026-05-29T06:14:15.404Z</div>
+  <div class="grid">
+    <div class="box"><strong><span data-lang="zh">客户信息</span><span data-lang="en">Customer</span></strong><br/>ZHEN Studio<br/>LIANG<br/>zhenyu_liang@outlook.com<br/>+44 7551043036</div>
+    <div class="box"><strong><span data-lang="zh">交付信息</span><span data-lang="en">Delivery Info</span></strong><br/>英国 / Codex Test Port<br/><span data-lang="zh">集装箱</span><span data-lang="en">Container</span>: 20GP<br/><span data-lang="zh">体积</span><span data-lang="en">Volume</span>: 0 m3<br/><span data-lang="zh">重量</span><span data-lang="en">Weight</span>: 0 kg</div>
+  </div>
+  <table>
+    <thead><tr><th><span data-lang="zh">产品</span><span data-lang="en">Product</span></th><th>SKU</th><th><span data-lang="zh">数量</span><span data-lang="en">Qty</span></th><th><span data-lang="zh">单价</span><span data-lang="en">Unit Price</span></th><th><span data-lang="zh">金额</span><span data-lang="en">Amount</span></th></tr></thead>
+    <tbody>
+    <tr>
+      <td><div class="product-cell"><img class="product-image" src="http://localhost:3000/vendor-storefront/assets/植绒衣架/637679271230/sku_6_墨绿色植绒经典款_001_7b0a8db10c.jpg" alt="跨境植绒衣架防滑塑料无痕衣架透光衣服挂家用成人衣撑子工厂批发" /><span class="product-name" data-lang="zh">跨境植绒衣架防滑塑料无痕衣架透光衣服挂家用成人衣撑子工厂批发</span><span class="product-name" data-lang="en">跨 Velvet hanger Non-slip Plastic No-markhanger 光衣服挂家 Adult hanger 工 Wholesale</span></div></td>
+      <td>HG271230-sku-1</td>
+      <td>3</td>
+      <td>USD 19.27</td>
+      <td>USD 57.82</td>
+    </tr>
+  </tbody>
+  </table>
+  <div class="total"><span data-lang="zh">总计</span><span data-lang="en">Grand Total</span>: USD 57.82</div>
+  <p class="muted"><span data-lang="zh">请保留此报价单作为参考。在线访问链接可能过期，但报价单号仍可用于查询。</span><span data-lang="en">Please keep this quotation for reference. The online access link may expire, but this quote number remains valid for lookup.</span></p>
+  <script>
+    document.querySelectorAll("[data-switch]").forEach(function(button){
+      button.addEventListener("click", function(){
+        document.body.classList.toggle("lang-zh", button.dataset.switch === "zh");
+        document.body.classList.toggle("lang-en", button.dataset.switch === "en");
+        document.documentElement.lang = button.dataset.switch || "en";
+      });
+    });
+  </script>
+</body>
+</html>

@@ -16,17 +16,18 @@ import { useEffect, useState } from "react";
 import { AdminTop } from "../shared/AdminTop";
 import { PaginationFooter } from "../shared/PaginationFooter";
 import { SmallMetric } from "../shared/SmallMetric";
+import { CurrencySelect, useAdminCurrency } from "../shared/currency";
+import { FtSelect } from "../shared/FtSelect";
 import { useAutoDismissMessage, usePagination } from "../shared/hooks";
+import { downloadAdminExport } from "../shared/utils";
 import { ProductDetail } from "./ProductDetail";
 import { ProductEditor } from "./ProductEditor";
-import { normalizeImageList } from "./ProductDetail";
-import { categories as fallbackCategories } from "@/lib/mock-data";
-import type { Category } from "@/lib/types";
 import type { ProductFormState, ProductMetrics, ProductWithStatus } from "./types";
+import type { CategoryWithMeta } from "../categories/types";
 
 export function ProductListAdmin() {
   const [rows, setRows] = useState<ProductWithStatus[]>([]);
-  const [dbCategories, setDbCategories] = useState<Category[]>(fallbackCategories);
+  const [dbCategories, setDbCategories] = useState<CategoryWithMeta[]>([]);
   const [metrics, setMetrics] = useState<ProductMetrics>({ total: 0, active: 0, inactive: 0, lowStock: 0, todayNew: 0 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -39,6 +40,7 @@ export function ProductListAdmin() {
   const [saving, setSaving] = useState(false);
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(new Set());
   const [message, setMessage] = useAutoDismissMessage();
+  const money = useAdminCurrency("CNY");
   const selected = rows.find((product) => product.id === selectedId) ?? rows[0] ?? null;
   const visibleRows = rows.filter((product) => {
     const keyword = query.trim().toLowerCase();
@@ -63,7 +65,7 @@ export function ProductListAdmin() {
     setLoading(true);
     await fetch("/api/admin/products")
       .then((response) => response.json())
-      .then((data: { products: ProductWithStatus[]; categories: Category[]; metrics: ProductMetrics }) => {
+      .then((data: { products: ProductWithStatus[]; categories: CategoryWithMeta[]; metrics: ProductMetrics }) => {
         setRows(data.products);
         setDbCategories(data.categories);
         setMetrics(data.metrics);
@@ -93,6 +95,21 @@ export function ProductListAdmin() {
   async function saveProduct(form: ProductFormState) {
     setSaving(true);
     setMessage("");
+    const specs = form.specs.map((spec, index) => ({
+      id: spec.id || `sku-${index + 1}`,
+      label: spec.label || spec.skuColor || spec.skuBody || `SKU ${index + 1}`,
+      price: Number(spec.price),
+      stock: Number(spec.stock),
+      image: spec.image || form.image,
+      skuBody: spec.skuBody,
+      skuColor: spec.skuColor,
+      skuName: spec.skuName,
+      rankPrice: spec.rankPrice === "" || spec.rankPrice == null ? null : Number(spec.rankPrice),
+      priceStatus: spec.priceStatus,
+      imageMatch: spec.imageMatch,
+      imageSize: spec.imageSize,
+      sortOrder: index
+    }));
     const payload = {
       id: form.id,
       sku: form.sku,
@@ -109,14 +126,11 @@ export function ProductListAdmin() {
       supplier: form.supplier,
       sourceUrl: form.sourceUrl,
       status: form.status,
-      stock: Number(form.stock),
-      specs: normalizeImageList(form.images, form.image).map((image, index) => ({
-        id: `s${index + 1}`,
-        label: index === 0 ? "默认规格" : `图片 ${index + 1}`,
-        price: Number(form.price),
-        stock: index === 0 ? Number(form.stock) : 0,
-        image
-      }))
+      stock: specs.reduce((sum, spec) => sum + Number(spec.stock || 0), 0) || Number(form.stock),
+      stockWarning: Number(form.stockWarning) || 1000,
+      markupValue: form.markupValue === "" ? null : Number(form.markupValue),
+      markupType: form.markupType,
+      specs
     };
     const response = await fetch("/api/admin/products", {
       method: form.id ? "PUT" : "POST",
@@ -204,7 +218,8 @@ export function ProductListAdmin() {
   return (
     <>
       <AdminTop title="产品列表" subtitle="管理所有产品信息、库存、价格和展示状态">
-        <button className="admin-light"><Download size={18} /> 导出数据</button>
+        <CurrencySelect value={money.currency} onChange={(value) => money.setCurrency(value)} />
+        <button className="admin-light" onClick={() => downloadAdminExport("products")}><Download size={18} /> 导出数据</button>
         <button className="admin-primary" onClick={openCreate}><Plus size={18} /> 添加产品</button>
       </AdminTop>
       {message && <div className="admin-message">{message}</div>}
@@ -219,20 +234,29 @@ export function ProductListAdmin() {
         <section className="admin-panel product-table-panel">
           <div className="admin-filters">
             <label><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索产品名称 / SKU / 关键词..." /></label>
-            <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
-              <option value="all">所有分类</option>
-              {dbCategories.map((category) => <option value={category.id} key={category.id}>{category.name}</option>)}
-            </select>
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-              <option value="all">上架状态</option>
-              <option value="active">上架中</option>
-              <option value="inactive">已下架</option>
-            </select>
-            <select value={stockFilter} onChange={(event) => setStockFilter(event.target.value)}>
-              <option value="all">库存状态</option>
-              <option value="ok">库存充足</option>
-              <option value="low">库存预警</option>
-            </select>
+            <FtSelect
+              value={categoryFilter}
+              options={[{ value: "all", label: "所有分类" }, ...dbCategories.map((category) => ({ value: category.id, label: category.name }))]}
+              onChange={setCategoryFilter}
+            />
+            <FtSelect
+              value={statusFilter}
+              options={[
+                { value: "all", label: "上架状态" },
+                { value: "active", label: "上架中" },
+                { value: "inactive", label: "已下架" }
+              ]}
+              onChange={setStatusFilter}
+            />
+            <FtSelect
+              value={stockFilter}
+              options={[
+                { value: "all", label: "库存状态" },
+                { value: "ok", label: "库存充足" },
+                { value: "low", label: "库存预警" }
+              ]}
+              onChange={setStockFilter}
+            />
             <button onClick={() => void loadProducts()}><RefreshCw size={16} /> 刷新</button>
             <button onClick={resetFilters}>重置</button>
           </div>
@@ -244,17 +268,17 @@ export function ProductListAdmin() {
           </div>
           <div className="admin-table-scroll">
             <table className="admin-table">
-              <thead><tr><th className="sticky-select-col"><input type="checkbox" checked={allProductsSelected} onChange={toggleSelectAllProducts} /></th><th>产品信息</th><th>SKU</th><th>分类</th><th>价格 (CNY)</th><th>库存</th><th className="sticky-status-col">状态</th><th className="sticky-actions-col">操作</th></tr></thead>
+              <thead><tr><th className="sticky-select-col"><input type="checkbox" checked={allProductsSelected} onChange={toggleSelectAllProducts} /></th><th>产品信息</th><th>SKU</th><th>分类</th><th>价格 ({money.currency})</th><th>库存</th><th className="sticky-status-col">状态</th><th className="sticky-actions-col">操作</th></tr></thead>
               <tbody>
                 {loading && <tr><td colSpan={8}>正在从数据库加载产品...</td></tr>}
                 {!loading && visibleRows.length === 0 && <tr><td colSpan={8}>暂无产品数据。</td></tr>}
                 {pagination.pageItems.map((product) => (
                   <tr key={product.id} className={selected?.id === product.id ? "selected" : ""} onClick={() => setSelectedId(product.id)}>
                     <td className="sticky-select-col"><input type="checkbox" checked={selectedProductIds.has(product.id)} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelectProduct(product.id)} /></td>
-                    <td className="product-cell"><img src={product.image} alt="" /><strong>{product.name}</strong><span>{product.size}</span></td>
+                    <td><div className="product-cell"><img src={product.image} alt="" /><strong>{product.name}</strong><span>{product.size}</span></div></td>
                     <td>{product.sku}</td>
                     <td>{dbCategories.find((entry) => entry.id === product.categoryId)?.name}</td>
-                    <td><strong>¥ {(product.price * 31).toFixed(2)}</strong><span>MOQ: {product.moq}</span></td>
+                    <td><strong>{money.format(product.price, "CNY")}</strong><span>MOQ: {product.moq}</span></td>
                     <td><strong>{product.stock.toLocaleString()}</strong><em>{product.stock < 1000 ? "预警" : "充足"}</em></td>
                     <td className="sticky-status-col">
                       <button
@@ -281,7 +305,7 @@ export function ProductListAdmin() {
             onPageSizeChange={pagination.setPageSize}
           />
         </section>
-        {selected && <ProductDetail product={selected} categories={dbCategories} onEdit={openEdit} onToggle={toggleStatus} onDelete={removeProduct} />}
+        {selected && <ProductDetail product={selected} categories={dbCategories} displayCurrency={money.currency} rateMap={money.rateMap} onEdit={openEdit} onToggle={toggleStatus} onDelete={removeProduct} />}
       </div>
       {showEditor && (
         <ProductEditor

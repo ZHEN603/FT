@@ -1,45 +1,49 @@
 import { randomUUID } from "node:crypto";
-import { getPool, initDb, formatDbDateTime, normalizeDbTimestamp, quoteStatusToCustomerStatus } from "./init";
+import { getPool, initDb, formatDbDateTime, quoteStatusToCustomerStatus } from "./init";
+import { inferRegionFromPhone } from "@/lib/phone-region";
 import type { DbExecutor } from "./init";
-import type { CustomerGroup, CustomerInput, CustomerStatus, CustomerWithStats, FollowupRecord, QuoteWithItems } from "./types";
+import type { CustomerGroup, CustomerInput, CustomerStatus, CustomerWithStats, QuoteWithItems, SupportedCurrency } from "./types";
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-export async function seedCustomerFollowups(customerId: string, company: string, client: DbExecutor = getPool()) {
-  const count = await client.query<{ count: string }>("SELECT COUNT(*) AS count FROM customer_followups WHERE customer_id = $1", [customerId]);
-  if (Number(count.rows[0].count) > 0) return;
-  const rows = [
-    ["发送报价单，客户确认价格可接受，正在内部审批。", "张经理", "报价跟进"],
-    [`客户询问 ${company} 产品细节和交期。`, "张经理", "产品咨询"],
-    ["电话沟通，了解客户需求。", "李业务", "客户跟进"],
-    ["发送产品目录。", "张经理", "产品咨询"],
-    ["首次联系客户。", "李业务", "客户跟进"]
-  ];
-  for (const [index, row] of rows.entries()) {
-    await client.query(
-      `INSERT INTO customer_followups (id, customer_id, content, owner, followup_type, followup_status, next_follow_up_at, created_at)
-       VALUES ($1,$2,$3,$4,$5,'跟进中',now() + interval '1 day',now() - ($6::int * interval '1 day'))`,
-      [`cf-${customerId}-${index}`, customerId, row[0], row[1], row[2], index]
-    );
-  }
-}
-
 export async function upsertCustomerFromQuote(input: CustomerInput, client: DbExecutor = getPool()) {
-  const existing = await client.query<{ id: string }>("SELECT id FROM customers WHERE email = $1", [input.email]);
+  const inferred = inferRegionFromPhone(input.whatsapp);
+  const country = inferred?.country || input.country || "未知";
+  const preferredLanguage = inferred?.language || input.preferredLanguage || "en";
+  const preferredCurrency = inferred?.currency || input.preferredCurrency || "USD";
+  const group = input.group ?? "普通客户";
+  const status = input.status ?? "活跃";
+  const notes = input.notes ?? "";
+  const phone = input.whatsapp.replace(/\D/g, "");
+  const existing = await client.query<{ id: string }>(
+    `SELECT id FROM customers
+     WHERE (LOWER(email) = LOWER($1) AND $1 <> '')
+        OR ($2 <> '' AND regexp_replace(whatsapp, '\\D', '', 'g') = $2)
+     ORDER BY is_visitor ASC, updated_at DESC
+     LIMIT 1`,
+    [input.email, phone]
+  );
   if (existing.rows[0]) {
     await client.query(
       `UPDATE customers SET
-        company = $2,
-        contact_name = $3,
-        country = $4,
-        destination_port = $5,
-        whatsapp = $6,
-        status = $7,
-        customer_group = CASE WHEN customer_group = '重要客户' THEN customer_group ELSE $8 END,
+        company = CASE WHEN $11::boolean AND NOT is_visitor THEN company ELSE $2 END,
+        contact_name = CASE WHEN $11::boolean AND NOT is_visitor THEN contact_name ELSE $3 END,
+        country = CASE WHEN $11::boolean AND NOT is_visitor THEN country ELSE $4 END,
+        destination_port = CASE WHEN $11::boolean AND NOT is_visitor THEN destination_port ELSE $5 END,
+        preferred_language = CASE WHEN $11::boolean AND NOT is_visitor THEN preferred_language ELSE $6 END,
+        preferred_currency = CASE WHEN $11::boolean AND NOT is_visitor THEN preferred_currency ELSE $7 END,
+        whatsapp = CASE WHEN $11::boolean AND NOT is_visitor THEN whatsapp ELSE $8 END,
+        status = CASE WHEN $11::boolean THEN status ELSE $9 END,
+        customer_group = CASE
+          WHEN $11::boolean THEN customer_group
+          WHEN customer_group = '重要客户' THEN customer_group
+          ELSE $10
+        END,
+        is_visitor = CASE WHEN $11::boolean THEN is_visitor ELSE false END,
         last_follow_up_at = now(),
         updated_at = now()
        WHERE id = $1`,
-      [existing.rows[0].id, input.company, input.contactName, input.country, input.destinationPort, input.whatsapp, input.status, input.group]
+      [existing.rows[0].id, input.company, input.contactName, country, input.destinationPort, preferredLanguage, preferredCurrency, input.whatsapp, status, group, input.isVisitor ?? false]
     );
     return existing.rows[0].id;
   }
@@ -48,11 +52,10 @@ export async function upsertCustomerFromQuote(input: CustomerInput, client: DbEx
   await client.query(
     `INSERT INTO customers (
       id, customer_no, company, contact_name, country, destination_port, whatsapp, email,
-      customer_group, status, notes, first_inquiry_at, last_follow_up_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())`,
-    [id, customerNo, input.company, input.contactName, input.country, input.destinationPort, input.whatsapp, input.email, input.group, input.status, input.notes]
+      preferred_language, preferred_currency, customer_group, status, notes, is_visitor, first_inquiry_at, last_follow_up_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),now())`,
+    [id, customerNo, input.company, input.contactName, country, input.destinationPort, input.whatsapp, input.email, preferredLanguage, preferredCurrency, group, status, notes, input.isVisitor ?? false]
   );
-  await seedCustomerFollowups(id, input.company, client);
   return id;
 }
 
@@ -68,6 +71,9 @@ export async function listCustomersFromDb(): Promise<CustomerWithStats[]> {
       contact_name AS "contactName",
       country,
       destination_port AS "destinationPort",
+      preferred_language AS "preferredLanguage",
+      preferred_currency AS "preferredCurrency",
+      is_visitor AS "isVisitor",
       whatsapp,
       email,
       customer_group AS "group",
@@ -76,6 +82,8 @@ export async function listCustomersFromDb(): Promise<CustomerWithStats[]> {
       first_inquiry_at AS "firstInquiryAt",
       last_follow_up_at AS "lastFollowUpAt"
     FROM customers
+    WHERE NOT is_visitor
+       OR EXISTS (SELECT 1 FROM quotes q WHERE q.customer_id = customers.id)
     ORDER BY last_follow_up_at DESC, company ASC
   `);
   // Import listQuotesFromDb lazily to avoid circular dep at module level
@@ -88,9 +96,12 @@ export async function listCustomersFromDb(): Promise<CustomerWithStats[]> {
   `);
   const quotesByCustomer = new Map<string, QuoteWithItems[]>();
   const customerByEmail = new Map<string, string>();
-  customers.rows.forEach((row) => customerByEmail.set(String(row.email), String(row.id)));
+  const visibleCustomerIds = new Set(customers.rows.map((row) => String(row.id)));
+  customers.rows.forEach((row) => customerByEmail.set(String(row.email).toLowerCase(), String(row.id)));
   quotes.forEach((quote) => {
-    const customerId = customerByEmail.get(quote.email);
+    const customerId = quote.customerId && visibleCustomerIds.has(quote.customerId)
+      ? quote.customerId
+      : customerByEmail.get(quote.email.toLowerCase());
     if (!customerId) return;
     quotesByCustomer.set(customerId, [...(quotesByCustomer.get(customerId) ?? []), quote]);
   });
@@ -106,13 +117,17 @@ export async function listCustomersFromDb(): Promise<CustomerWithStats[]> {
   });
   return customers.rows.map((row) => {
     const customerQuotes = quotesByCustomer.get(String(row.id)) ?? [];
+    const inferred = inferRegionFromPhone(String(row.whatsapp));
     return {
       id: String(row.id),
       customerNo: String(row.customerNo),
       company: String(row.company),
       contactName: String(row.contactName),
-      country: String(row.country),
+      country: inferred?.country ?? String(row.country),
       destinationPort: String(row.destinationPort),
+      preferredLanguage: inferred?.language ?? String(row.preferredLanguage ?? "en"),
+      preferredCurrency: (inferred?.currency ?? (row.preferredCurrency ? String(row.preferredCurrency) : "USD")) as SupportedCurrency,
+      isVisitor: Boolean(row.isVisitor),
       whatsapp: String(row.whatsapp),
       email: String(row.email),
       group: row.group as CustomerGroup,
@@ -138,26 +153,32 @@ export async function createCustomer(input: CustomerInput): Promise<CustomerWith
   await initDb();
   const id = input.id ?? `cust-${randomUUID()}`;
   const customerNo = input.customerNo ?? `CUST-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${String(Math.floor(Math.random() * 900) + 100)}`;
+  const inferred = inferRegionFromPhone(input.whatsapp);
+  const country = inferred?.country || input.country || "未知";
+  const preferredLanguage = inferred?.language || input.preferredLanguage || "en";
+  const preferredCurrency = inferred?.currency || input.preferredCurrency || "USD";
   await getPool().query(
     `INSERT INTO customers (
       id, customer_no, company, contact_name, country, destination_port, whatsapp, email,
-      customer_group, status, notes, first_inquiry_at, last_follow_up_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())`,
+      preferred_language, preferred_currency, is_visitor, customer_group, status, notes, first_inquiry_at, last_follow_up_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),now())`,
     [
       id,
       customerNo,
       input.company,
       input.contactName,
-      input.country,
+      country,
       input.destinationPort,
       input.whatsapp,
       input.email,
+      preferredLanguage,
+      preferredCurrency,
+      input.isVisitor ?? false,
       input.group ?? "普通客户",
       input.status ?? "活跃",
       input.notes ?? ""
     ]
   );
-  await seedCustomerFollowups(id, input.company);
   const customer = (await listCustomersFromDb()).find((entry) => entry.id === id);
   if (!customer) throw new Error("Customer creation failed");
   return customer;
@@ -167,26 +188,34 @@ export async function updateCustomer(id: string, input: Partial<CustomerInput>):
   await initDb();
   const current = (await listCustomersFromDb()).find((entry) => entry.id === id);
   if (!current) return null;
+  const whatsapp = input.whatsapp ?? current.whatsapp;
+  const inferred = inferRegionFromPhone(whatsapp);
   await getPool().query(
     `UPDATE customers SET
       company = $2,
       contact_name = $3,
       country = $4,
       destination_port = $5,
-      whatsapp = $6,
-      email = $7,
-      customer_group = $8,
-      status = $9,
-      notes = $10,
+      preferred_language = $6,
+      preferred_currency = $7,
+      is_visitor = $8,
+      whatsapp = $9,
+      email = $10,
+      customer_group = $11,
+      status = $12,
+      notes = $13,
       updated_at = now()
      WHERE id = $1`,
     [
       id,
       input.company ?? current.company,
       input.contactName ?? current.contactName,
-      input.country ?? current.country,
+      input.country ?? inferred?.country ?? current.country,
       input.destinationPort ?? current.destinationPort,
-      input.whatsapp ?? current.whatsapp,
+      input.preferredLanguage ?? inferred?.language ?? current.preferredLanguage,
+      input.preferredCurrency ?? inferred?.currency ?? current.preferredCurrency,
+      input.isVisitor ?? current.isVisitor,
+      whatsapp,
       input.email ?? current.email,
       input.group ?? current.group,
       input.status ?? current.status,
@@ -210,6 +239,8 @@ export async function syncCustomersFromQuotes() {
       contact_name AS "contactName",
       country,
       port AS "destinationPort",
+      preferred_language AS "preferredLanguage",
+      currency AS "preferredCurrency",
       whatsapp,
       email,
       status,
@@ -223,11 +254,14 @@ export async function syncCustomersFromQuotes() {
       contactName: row.contactName,
       country: row.country,
       destinationPort: row.destinationPort,
+      preferredLanguage: row.preferredLanguage,
+      preferredCurrency: row.preferredCurrency,
       whatsapp: row.whatsapp,
       email: row.email,
+      isVisitor: false,
       status: quoteStatusToCustomerStatus(row.status),
       group: Number(row.productAmount) > 7000 ? "重要客户" : "普通客户",
-      notes: "客户主要采购衣架产品，质量要求高，付款方式偏好 LC 60天。"
+      notes: "由报价单同步创建的客户。"
     });
     await getPool().query("UPDATE quotes SET customer_id = $1 WHERE email = $2", [customerId, row.email]);
   }

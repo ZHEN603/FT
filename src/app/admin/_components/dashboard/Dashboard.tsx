@@ -12,24 +12,58 @@ import {
   Users
 } from "lucide-react";
 import { ChevronDown } from "lucide-react";
-import React from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { AdminTop } from "../shared/AdminTop";
+import { appendDateRangeParams, defaultAdminDateRange, toDateInputValue } from "../shared/utils";
 import type { Quote } from "@/lib/types";
 
-export function Dashboard({ quotes }: { quotes: Quote[] }) {
+type DashboardQuoteMetrics = { total: number; pending: number; sent: number; closed: number; amount: number };
+
+export function Dashboard() {
+  const [{ startDate: defaultStartDate, endDate: defaultEndDate }] = useState(defaultAdminDateRange);
+  const [startDate, setStartDate] = useState(defaultStartDate);
+  const [endDate, setEndDate] = useState(defaultEndDate);
+  const [quotes, setQuotes] = useState<Quote[]>([]);
+  const [quoteMetrics, setQuoteMetrics] = useState<DashboardQuoteMetrics>({ total: 0, pending: 0, sent: 0, closed: 0, amount: 0 });
+
+  const loadDashboard = useCallback(async function loadDashboard() {
+    const params = appendDateRangeParams(new URLSearchParams(), startDate, endDate);
+    const response = await fetch(`/api/admin/quotes?${params.toString()}`);
+    if (!response.ok) return;
+    const data = await response.json() as { quotes: Quote[]; metrics: DashboardQuoteMetrics };
+    setQuotes(data.quotes ?? []);
+    setQuoteMetrics(data.metrics ?? { total: 0, pending: 0, sent: 0, closed: 0, amount: 0 });
+  }, [endDate, startDate]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadDashboard(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadDashboard]);
+
+  function selectToday() {
+    const today = toDateInputValue(new Date());
+    setStartDate(today);
+    setEndDate(today);
+  }
+
   return (
     <>
       <AdminTop title="仪表盘" subtitle="聚合数据看全局，助力外贸业务高效增长">
-        <button className="admin-light"><CalendarDays size={18} /> 2026-05-24</button>
-        <button className="admin-light">今天 <ChevronDown size={16} /></button>
-        <button className="admin-primary"><RefreshCw size={18} /> 刷新数据</button>
+        <label className="date-range-control">
+          <CalendarDays size={16} />
+          <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+          <span>~</span>
+          <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+        </label>
+        <button className="admin-light" onClick={selectToday}>今天 <ChevronDown size={16} /></button>
+        <button className="admin-primary" onClick={() => void loadDashboard()}><RefreshCw size={18} /> 刷新数据</button>
       </AdminTop>
       <div className="admin-metrics six">
         <Metric icon={Box} title="产品上架数量SKU" value="1,286" caption="已上架SKU总数" trend="+12.3%" />
         <Metric icon={Users} title="网站访客数" value="3,842" caption="累计访问人数" trend="+15.6%" />
         <Metric icon={ClipboardList} title="产品流量数" value="12,680" caption="产品页访问量" trend="+22.7%" />
-        <Metric icon={FileText} title="本月询盘" value="129" caption="询盘总数" trend="+8.4%" />
-        <Metric icon={Clock} title="待处理报价单" value="42" caption="报价单数量" trend="-5.1%" danger />
+        <Metric icon={FileText} title="本月询盘" value={String(quoteMetrics.total)} caption="当前时间范围内报价单" trend="+8.4%" />
+        <Metric icon={Clock} title="待处理报价单" value={String(quoteMetrics.pending)} caption="报价单数量" trend="-5.1%" danger />
         <Metric icon={Users} title="供应商数量" value="57" caption="合作供应商数" trend="+3.6%" />
       </div>
       <div className="dashboard-grid">

@@ -14,6 +14,8 @@ export type CategoryWithMeta = Category & {
   description: string;
   metaTitle: string;
   metaDescription: string;
+  markupValue: number | null;
+  markupType: "percentage" | "fixed";
 };
 
 export type CategoryFormState = {
@@ -28,4 +30,6 @@ export type CategoryFormState = {
   description: string;
   metaTitle: string;
   metaDescription: string;
+  markupValue: string;
+  markupType: "percentage" | "fixed";
 };

@@ -1,5 +1,13 @@
 "use client";
 
+import { FtSelect } from "./FtSelect";
+
+const PAGE_SIZE_OPTIONS = [
+  { value: "10", label: "10 条/页" },
+  { value: "20", label: "20 条/页" },
+  { value: "50", label: "50 条/页" }
+];
+
 export function paginationRange(page: number, totalPages: number): Array<number | "..."> {
   if (totalPages <= 7) {
     return Array.from({ length: totalPages }, (_, index) => index + 1);
@@ -41,11 +49,12 @@ export function PaginationFooter({
         ))}
         <button disabled={page >= totalPages} onClick={() => onPageChange(page + 1)}>&gt;</button>
       </div>
-      <select value={pageSize} onChange={(event) => onPageSizeChange(Number(event.target.value))}>
-        <option value="10">10 条/页</option>
-        <option value="20">20 条/页</option>
-        <option value="50">50 条/页</option>
-      </select>
+      <FtSelect
+        className="table-foot-size-select"
+        value={String(pageSize)}
+        options={PAGE_SIZE_OPTIONS}
+        onChange={(value) => onPageSizeChange(Number(value))}
+      />
     </div>
   );
 }

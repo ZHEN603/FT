@@ -2,12 +2,24 @@ import type { Category, Product, ProductSpec, Quote } from "@/lib/types";
 
 export type ProductStatus = "active" | "inactive";
 export type CategoryStatus = "active" | "inactive";
-export type MarkupStatus = "configured" | "applied" | "unset";
-export type MarkupRuleStatus = "active" | "inactive";
-export type MarkupRuleType = "percentage" | "fixed";
+export type PriceMarkupType = "percentage" | "fixed";
+export type PriceMarkupSource = "product" | "category" | "global" | "none";
+export const SUPPORTED_CURRENCIES = ["CNY", "USD", "EUR", "GBP", "JPY", "AUD", "CAD"] as const;
+export type SupportedCurrency = typeof SUPPORTED_CURRENCIES[number];
 export type ProductWithStatus = Product & {
   status: ProductStatus;
   stock: number;
+  stockWarning: number;
+  markupValue: number | null;
+  markupType: PriceMarkupType;
+  effectiveMarkupValue: number;
+  effectiveMarkupType: PriceMarkupType;
+  markupSource: PriceMarkupSource;
+  markupSourceId: string | null;
+  markupSourceName: string | null;
+  markupAmount: number;
+  markupPercent: number;
+  finalPrice: number;
 };
 export type CategoryWithMeta = Category & {
   parentId: string | null;
@@ -18,6 +30,8 @@ export type CategoryWithMeta = Category & {
   description: string;
   metaTitle: string;
   metaDescription: string;
+  markupValue: number | null;
+  markupType: PriceMarkupType;
 };
 export type CategoryInput = {
   id?: string;
@@ -31,100 +45,16 @@ export type CategoryInput = {
   description?: string;
   metaTitle?: string;
   metaDescription?: string;
-};
-export type MarkupRule = {
-  id: string;
-  name: string;
-  type: MarkupRuleType;
-  value: number;
-  scope: "all" | "category";
-  categoryId: string | null;
-  status: MarkupRuleStatus;
-  priority: number;
-  description: string;
-  appliedCount: number;
-  createdAt: string;
-  categoryName?: string | null;
-};
-export type MarkupRuleInput = {
-  id?: string;
-  name: string;
-  type?: MarkupRuleType;
-  value: number;
-  scope?: "all" | "category";
-  categoryId?: string | null;
-  status?: MarkupRuleStatus;
-  priority?: number;
-  description?: string;
-};
-export type ProductMarkup = {
-  id: string;
-  productId: string;
-  sku: string;
-  name: string;
-  nameEn: string;
-  image: string;
-  categoryId: string;
-  categoryName: string;
-  originalPrice: number;
-  markupPercent: number;
-  finalPrice: number;
-  status: MarkupStatus;
-  ruleId: string | null;
-  ruleName: string | null;
-  appliedAt: string | null;
-};
-export type ProductMarkupInput = {
-  productId: string;
-  markupPercent?: number;
-  ruleId?: string | null;
-  status?: MarkupStatus;
-};
-export type ProductMarkupRuleLink = {
-  id: string;
-  productId: string;
-  ruleId: string;
-  ruleName: string;
-  ruleValue: number;
-  ruleScope: "all" | "category";
-  ruleCategoryId: string | null;
-  ruleStatus: MarkupRuleStatus;
-  enabled: boolean;
-  sortOrder: number;
-};
-export type ProductMarkupOverride = {
-  overrideValue: number | null;
-  overrideMode: "=" | "*";
-};
-export type ProductMarkupListInput = {
-  page?: number;
-  pageSize?: number;
-  query?: string;
-  categoryId?: string;
-  status?: MarkupStatus | "all";
-  ruleId?: string | "all" | "none";
-};
-export type ProductMarkupListResult = {
-  products: ProductMarkup[];
-  pagination: {
-    total: number;
-    page: number;
-    pageSize: number;
-    totalPages: number;
-  };
-  metrics: {
-    total: number;
-    configured: number;
-    applied: number;
-    unset: number;
-  };
+  markupValue?: number | null;
+  markupType?: PriceMarkupType;
 };
 export type QuoteWithItems = Quote & {
   quoteNo: string;
   customerId?: string | null;
   contactName: string;
   destinationPort: string;
-  currency: "CNY" | "USD";
+  preferredLanguage: string;
+  currency: SupportedCurrency;
   exchangeRate: number;
   loadedVolumeM3: number;
   maxVolumeM3: number;
@@ -142,11 +72,12 @@ export type QuoteLineItem = {
   id: string;
   productId: string | null;
   name: string;
+  nameEn?: string | null;
   sku: string;
   quantity: number;
   unitPrice: number;
   sourceUnitPriceCny?: number | null;
-  currency?: "CNY" | "USD";
+  currency?: SupportedCurrency;
   markupPercent?: number;
   amount: number;
   image?: string | null;
@@ -175,6 +106,48 @@ export type QuoteSendRecord = {
   error?: string | null;
   createdAt: string;
 };
+export type ProductCatalogDocumentItem = {
+  productId: string;
+  specId?: string | null;
+  sku: string;
+  name: string;
+  nameEn: string;
+  image: string | null;
+  material: string;
+  size: string;
+  moq: number;
+  price: number;
+  specLabel: string;
+  specPrice: number;
+  categoryId: string;
+};
+export type ProductCatalogDocument = {
+  id: string;
+  conversationId: string | null;
+  title: string;
+  filePath: string;
+  fileHash: string;
+  productCount: number;
+  items: ProductCatalogDocumentItem[];
+  contactName: string;
+  contactCompany: string;
+  contactWhatsapp: string;
+  contactEmail: string;
+  generatedBy: string;
+  createdAt: string;
+};
+export type ProductCatalogSendRecord = {
+  id: string;
+  documentId: string;
+  conversationId: string | null;
+  channel: "whatsapp";
+  recipient: string;
+  status: "pending" | "sent" | "failed";
+  accessUrl: string | null;
+  externalId?: string | null;
+  error?: string | null;
+  createdAt: string;
+};
 export type QuoteSnapshot = {
   id: string;
   quoteId: string;
@@ -183,6 +156,7 @@ export type QuoteSnapshot = {
   triggeredBy: string;
   totalAmount: number;
   items: QuoteLineItem[];
+  quote?: QuoteWithItems | null;
   createdAt: string;
 };
 export type AdminNotification = {
@@ -203,12 +177,18 @@ export type CustomerAccessToken = {
   accessUrl: string;
 };
 export type CustomerQuoteAccess = {
-  customer: Pick<CustomerWithStats, "id" | "company" | "contactName" | "email" | "whatsapp">;
+  customer: Pick<CustomerWithStats, "id" | "company" | "contactName" | "email" | "whatsapp" | "preferredLanguage" | "preferredCurrency">;
   quotes: Array<QuoteWithItems & { documents: QuoteDocument[] }>;
   conversations: Conversation[];
 };
-export type QuoteInput = Omit<QuoteWithItems, "quoteNo" | "productCount" | "totalProducts" | "totalAmount"> & {
+export type QuoteInput = Omit<QuoteWithItems, "quoteNo" | "productCount" | "totalProducts" | "totalAmount" | "preferredLanguage"> & {
   quoteNo?: string;
+  preferredLanguage?: string;
+};
+export type ConversationQuoteLineInput = {
+  productId: string;
+  specId?: string | null;
+  quantity: number;
 };
 export type CustomerStatus = "活跃" | "跟进中" | "潜在" | "失效";
 export type CustomerGroup = "重要客户" | "普通客户" | "潜在客户";
@@ -219,6 +199,9 @@ export type CustomerWithStats = {
   contactName: string;
   country: string;
   destinationPort: string;
+  preferredLanguage: string;
+  preferredCurrency: SupportedCurrency;
+  isVisitor: boolean;
   whatsapp: string;
   email: string;
   group: CustomerGroup;
@@ -239,6 +222,9 @@ export type CustomerInput = {
   contactName: string;
   country: string;
   destinationPort: string;
+  preferredLanguage?: string;
+  preferredCurrency?: SupportedCurrency;
+  isVisitor?: boolean;
   whatsapp: string;
   email: string;
   group?: CustomerGroup;
@@ -380,7 +366,10 @@ export type ProductInput = Omit<Product, "id" | "specs"> & {
   id?: string;
   status?: ProductStatus;
   stock?: number;
+  stockWarning?: number;
   specs?: ProductSpec[];
+  markupValue?: number | null;
+  markupType?: PriceMarkupType;
 };
 export type StorefrontSku = {
   id: string;
@@ -389,14 +378,25 @@ export type StorefrontSku = {
   skuColor?: string;
   skuBody?: string;
   skuName?: string;
+  rankPrice?: number | null;
+  priceStatus?: string;
+  imageMatch?: string;
+  imageSize?: string;
 };
 export type StorefrontProduct = {
   id: string;
   offerId: string;
   name: string;
+  nameEn?: string;
   fullName: string;
+  fullNameEn?: string;
   cat1: string;
   cat2: string;
+  categoryName?: string;
+  categoryNameEn?: string;
+  categoryPathIds?: string[];
+  categoryPathName?: string;
+  categoryPathNameEn?: string;
   image: string;
   link: string;
   cbm: number;
@@ -415,11 +415,20 @@ export type StorefrontProduct = {
 };
 export type StorefrontCatalog = {
   products: StorefrontProduct[];
-  categories: Array<{ id: string; name: string; count: number }>;
+  categories: Array<{
+    id: string;
+    name: string;
+    nameEn?: string;
+    count: number;
+    parentId?: string | null;
+    level?: number;
+    sortOrder?: number;
+    pathIds?: string[];
+  }>;
 };
 export type StorefrontInquiryInput = {
   sessionId?: string;
-  currency?: "CNY" | "USD";
+  currency?: SupportedCurrency;
   customerName: string;
   company?: string;
   whatsapp: string;
@@ -444,6 +453,28 @@ export type StorefrontInquiryResult = {
   quote: QuoteWithItems;
   receipt: QuoteDocument;
   access: CustomerAccessToken;
+};
+export type ExchangeRate = {
+  id: string;
+  currencyFrom: string;
+  currencyTo: string;
+  rate: number;
+  source: string;
+  status: "active" | "inactive";
+  effectiveAt: string;
+  providerDate: string | null;
+  updatedAt: string;
+  errorMessage: string;
+};
+export type ExchangeRateSyncResult = {
+  rates: ExchangeRate[];
+  baseCurrency: string;
+  currencies: string[];
+  fromCache: boolean;
+  refreshed: boolean;
+  nextRefreshAt: string | null;
+  lastUpdatedAt: string | null;
+  message?: string;
 };
 export type ImportProductsInput = {
   sourceFile?: string;

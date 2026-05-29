@@ -26,7 +26,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       senderType: "admin",
       senderId: input.senderId ?? "admin-001",
       sourceText: input.message,
-      translatedText: input.message,
       direction: "outbound"
     });
     return NextResponse.json({ message }, { status: 201 });

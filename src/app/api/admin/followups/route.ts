@@ -9,9 +9,12 @@ import {
 } from "@/lib/db";
 import type { FollowupInput } from "@/lib/db";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const startDate = searchParams.get("startDate");
+  const endDate = searchParams.get("endDate");
   const [followups, customers, quotes] = await Promise.all([
-    listFollowupsFromDb(),
+    listFollowupsFromDb({ startDate, endDate }),
     listCustomersFromDb(),
     listQuotesFromDb()
   ]);
@@ -21,7 +24,7 @@ export async function GET() {
     quotes: quotes.map((quote) => ({ id: quote.id, quoteNo: quote.quoteNo, company: quote.company })),
     metrics: {
       total: followups.length,
-      today: followups.filter((item) => item.createdAt.slice(0, 10) === "2026-05-24").length,
+      today: followups.filter((item) => item.createdAt.slice(0, 10) === (endDate ?? new Date().toISOString().slice(0, 10))).length,
       pendingCustomers: new Set(followups.filter((item) => item.status === "跟进中").map((item) => item.customerId)).size,
       week: followups.filter((item) => item.status === "跟进中").length,
       closed: followups.filter((item) => item.status === "已成交").length

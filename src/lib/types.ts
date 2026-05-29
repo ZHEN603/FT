@@ -21,7 +21,19 @@ export type Product = {
   volumeM3: number;
   supplier: string;
   sourceUrl: string;
+  detailAttrs?: ProductDetailAttr[];
+  packaging?: ProductPackaging | null;
   specs: ProductSpec[];
+};
+
+export type ProductDetailAttr = {
+  name: string;
+  value: string;
+};
+
+export type ProductPackaging = {
+  headers: string[];
+  rows: string[][];
 };
 
 export type ProductSpec = {
@@ -30,6 +42,14 @@ export type ProductSpec = {
   price: number;
   stock: number;
   image?: string;
+  skuBody?: string;
+  skuColor?: string;
+  skuName?: string;
+  rankPrice?: number | null;
+  priceStatus?: string;
+  imageMatch?: string;
+  imageSize?: string;
+  sortOrder?: number;
 };
 
 export type QuoteItem = {

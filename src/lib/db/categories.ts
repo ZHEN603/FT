@@ -58,6 +58,8 @@ export async function listCategoriesDetailedFromDb(): Promise<CategoryWithMeta[]
       c.description,
       c.meta_title AS "metaTitle",
       c.meta_description AS "metaDescription",
+      c.markup_value AS "markupValue",
+      c.markup_type AS "markupType",
       COUNT(DISTINCT cp.product_id) AS "productCount"
     FROM categories c
     LEFT JOIN category_tree tree ON tree.root_id = c.id
@@ -75,13 +77,13 @@ export async function createCategory(input: CategoryInput): Promise<CategoryWith
     throw new Error("Parent category not found");
   }
   const id = input.id ?? `cat-${randomUUID()}`;
-  const level = parent ? Math.min(parent.level + 1, 3) : 1;
+  const level = parent ? parent.level + 1 : 1;
   const sortOrder = input.sortOrder ?? await getNextCategorySortOrder(input.parentId ?? null);
   await getPool().query(
     `INSERT INTO categories (
       id, name, name_en, icon, parent_id, level, status, sort_order,
-      description, meta_title, meta_description
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      description, meta_title, meta_description, markup_value, markup_type
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
     [
       id,
       input.name,
@@ -93,7 +95,9 @@ export async function createCategory(input: CategoryInput): Promise<CategoryWith
       sortOrder,
       input.description ?? "",
       input.metaTitle ?? "",
-      input.metaDescription ?? ""
+      input.metaDescription ?? "",
+      normalizeMarkupValue(input.markupValue),
+      input.markupType ?? "percentage"
     ]
   );
   const category = await getCategoryById(id);
@@ -116,14 +120,7 @@ export async function updateCategory(id: string, input: Partial<CategoryInput>):
   if (parentId && await isCategoryDescendant(parentId, id)) {
     throw new Error("Category cannot be moved under its descendant");
   }
-  const level = input.level ?? (parent ? Math.min(parent.level + 1, 3) : 1);
-  if (level > 3) {
-    throw new Error("Category level cannot exceed 3");
-  }
-  const descendantDepth = await getCategoryDescendantDepth(id);
-  if (level + descendantDepth > 3) {
-    throw new Error("Category descendants would exceed level 3");
-  }
+  const level = input.level ?? (parent ? parent.level + 1 : 1);
   await getPool().query(
     `UPDATE categories SET
       name = $2,
@@ -135,7 +132,9 @@ export async function updateCategory(id: string, input: Partial<CategoryInput>):
       sort_order = $8,
       description = $9,
       meta_title = $10,
-      meta_description = $11
+      meta_description = $11,
+      markup_value = $12,
+      markup_type = $13
     WHERE id = $1`,
     [
       id,
@@ -148,11 +147,34 @@ export async function updateCategory(id: string, input: Partial<CategoryInput>):
       input.sortOrder ?? current.sortOrder,
       input.description ?? current.description,
       input.metaTitle ?? current.metaTitle,
-      input.metaDescription ?? current.metaDescription
+      input.metaDescription ?? current.metaDescription,
+      "markupValue" in input ? normalizeMarkupValue(input.markupValue) : current.markupValue,
+      input.markupType ?? current.markupType
     ]
   );
   await syncCategoryDescendantLevels(id, level);
   return getCategoryById(id);
+}
+
+export async function deleteCategoryWithTransfer(id: string) {
+  await initDb();
+  const pool = getPool();
+  const catResult = await pool.query<{ parent_id: string | null }>(
+    "SELECT parent_id FROM categories WHERE id = $1",
+    [id]
+  );
+  if (!catResult.rows[0]) return { ok: false, reason: "分类不存在" };
+  const childResult = await pool.query<{ count: string }>(
+    "SELECT COUNT(*) AS count FROM categories WHERE parent_id = $1",
+    [id]
+  );
+  if (Number(childResult.rows[0].count) > 0) {
+    return { ok: false, reason: "该分类包含子分类，不能删除" };
+  }
+  const { parent_id: parentId } = catResult.rows[0];
+  await pool.query("UPDATE products SET category_id = $1 WHERE category_id = $2", [parentId, id]);
+  const result = await pool.query("DELETE FROM categories WHERE id = $1", [id]);
+  return { ok: (result.rowCount ?? 0) > 0 };
 }
 
 export async function deleteCategory(id: string) {
@@ -195,7 +217,7 @@ async function getCategoryDescendantDepth(categoryId: string): Promise<number> {
 async function syncCategoryDescendantLevels(categoryId: string, parentLevel: number) {
   const children = await getPool().query<{ id: string }>("SELECT id FROM categories WHERE parent_id = $1", [categoryId]);
   for (const child of children.rows) {
-    const childLevel = Math.min(parentLevel + 1, 3);
+    const childLevel = parentLevel + 1;
     await getPool().query("UPDATE categories SET level = $2 WHERE id = $1", [child.id, childLevel]);
     await syncCategoryDescendantLevels(child.id, childLevel);
   }
@@ -215,6 +237,8 @@ export async function getCategoryById(id: string): Promise<CategoryWithMeta | nu
       c.description,
       c.meta_title AS "metaTitle",
       c.meta_description AS "metaDescription",
+      c.markup_value AS "markupValue",
+      c.markup_type AS "markupType",
       COUNT(p.id) AS "productCount"
     FROM categories c
     LEFT JOIN products p ON p.category_id = c.id
@@ -235,6 +259,12 @@ async function getNextCategorySortOrder(parentId: string | null) {
   return Number(result.rows[0].next);
 }
 
+function normalizeMarkupValue(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 export function mapCategoryRow(row: Record<string, unknown>): CategoryWithMeta {
   const productCount = Number(row.productCount ?? 0);
   return {
@@ -250,6 +280,8 @@ export function mapCategoryRow(row: Record<string, unknown>): CategoryWithMeta {
     productCount,
     description: String(row.description ?? ""),
     metaTitle: String(row.metaTitle ?? ""),
-    metaDescription: String(row.metaDescription ?? "")
+    metaDescription: String(row.metaDescription ?? ""),
+    markupValue: row.markupValue == null ? null : Number(row.markupValue),
+    markupType: row.markupType === "fixed" ? "fixed" : "percentage"
   };
 }

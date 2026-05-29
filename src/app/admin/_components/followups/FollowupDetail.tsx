@@ -1,6 +1,6 @@
 "use client";
 
-import { X } from "lucide-react";
+import { MessageCircle, X } from "lucide-react";
 import { followupTypeClass } from "./FollowupEditorModal";
 import type { FollowupRecord } from "./types";
 
@@ -12,44 +12,57 @@ export function FollowupDetail({
   followup,
   onEdit,
   onClose,
-  onCreate
+  onCreate,
+  onOpenConversation
 }: {
   followup: FollowupRecord;
   onEdit: (followup: FollowupRecord) => void;
   onClose: (followup: FollowupRecord) => void;
   onCreate: () => void;
+  onOpenConversation: (target?: { whatsapp?: string; quoteId?: string }) => void;
 }) {
   return (
     <aside className="admin-detail followup-detail">
       <div className="detail-head"><h2>跟进记录详情</h2><X size={18} /></div>
-      <DetailSection title="基本信息">
-        <div className="detail-kv">
-          <span>客户名称</span><strong>{followup.company}</strong>
-          <span>联系人</span><strong>{followup.contactName}</strong>
-          <span>WhatsApp</span><strong>{followup.whatsapp}</strong>
-          <span>报价单号</span><strong>{followup.quoteNo ?? "-"}</strong>
-        </div>
-      </DetailSection>
-      <DetailSection title="跟进信息">
-        <div className="detail-kv">
-          <span>跟进类型</span><strong><span className={`followup-type-pill ${followupTypeClass(followup.type)}`}>{followup.type}</span></strong>
-          <span>跟进状态</span><strong><span className={`status-pill ${followup.status === "已成交" ? "active" : ""}`}>{followup.status}</span></strong>
-          <span>跟进人</span><strong>{followup.owner}</strong>
-          <span>跟进时间</span><strong>{followup.createdAt}</strong>
-          <span>下次跟进时间</span><strong>{followup.nextFollowUpAt ?? "-"}</strong>
-        </div>
-      </DetailSection>
-      <h3>跟进内容</h3>
-      <p className="followup-content-box">{followup.content}</p>
-      <h3>跟进记录时间线</h3>
-      <div className="followup-timeline">
-        {followup.timeline.map((item, index) => (
-          <div key={item.id} className={index === 0 ? "active" : ""}>
-            <span>{item.createdAt}</span>
-            <strong>{item.owner}</strong>
-            <p>{item.content}</p>
+      <div className="admin-detail-body">
+        <DetailSection title="基本信息">
+          <div className="detail-kv">
+            <span>客户名称</span><strong>{followup.company}</strong>
+            <span>联系人</span><strong>{followup.contactName}</strong>
+            <span>WhatsApp</span>
+            <strong>
+              <button
+                className="quote-contact-button followup-detail-contact"
+                type="button"
+                onClick={() => onOpenConversation({ whatsapp: followup.whatsapp, quoteId: followup.quoteId ?? undefined })}
+              >
+                <MessageCircle size={15} /> {followup.whatsapp || "未留 WhatsApp"}
+              </button>
+            </strong>
+            <span>报价单号</span><strong>{followup.quoteNo ?? "-"}</strong>
           </div>
-        ))}
+        </DetailSection>
+        <DetailSection title="跟进信息">
+          <div className="detail-kv">
+            <span>跟进类型</span><strong><span className={`followup-type-pill ${followupTypeClass(followup.type)}`}>{followup.type}</span></strong>
+            <span>跟进状态</span><strong><span className={`status-pill ${followup.status === "已成交" ? "active" : ""}`}>{followup.status}</span></strong>
+            <span>跟进人</span><strong>{followup.owner}</strong>
+            <span>跟进时间</span><strong>{followup.createdAt}</strong>
+            <span>下次跟进时间</span><strong>{followup.nextFollowUpAt ?? "-"}</strong>
+          </div>
+        </DetailSection>
+        <h3>跟进内容</h3>
+        <p className="followup-content-box">{followup.content}</p>
+        <h3>跟进记录时间线</h3>
+        <div className="followup-timeline">
+          {followup.timeline.map((item, index) => (
+            <div key={item.id} className={index === 0 ? "active" : ""}>
+              <span>{item.createdAt}</span>
+              <strong>{item.owner}</strong>
+              <p>{item.content}</p>
+            </div>
+          ))}
+        </div>
       </div>
       <div className="detail-actions">
         <button className="admin-light" onClick={() => onEdit(followup)}>编辑记录</button>

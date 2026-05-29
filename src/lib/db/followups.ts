@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { getPool, initDb, formatDbDateTime, normalizeDbTimestamp } from "./init";
+import { getPool, initDb, formatDbDateTime, normalizeDbTimestamp, type DbExecutor } from "./init";
+import type { DateRangeFilter } from "./quotes";
 import type { FollowupInput, FollowupRecord, FollowupStatus, FollowupType } from "./types";
 
 // ─── Helper mappers ───────────────────────────────────────────────────────────
@@ -27,8 +28,26 @@ export function mapFollowupRow(row: Record<string, unknown>): FollowupRecord {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-export async function listFollowupsFromDb(): Promise<FollowupRecord[]> {
+function followupDateRangeClause(range?: DateRangeFilter) {
+  const clauses: string[] = [];
+  const values: string[] = [];
+  if (range?.startDate) {
+    values.push(range.startDate);
+    clauses.push(`f.created_at >= $${values.length}::date`);
+  }
+  if (range?.endDate) {
+    values.push(range.endDate);
+    clauses.push(`f.created_at < ($${values.length}::date + INTERVAL '1 day')`);
+  }
+  return {
+    where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "",
+    values
+  };
+}
+
+export async function listFollowupsFromDb(range?: DateRangeFilter): Promise<FollowupRecord[]> {
   await initDb();
+  const dateFilter = followupDateRangeClause(range);
   const result = await getPool().query(`
     SELECT
       f.id,
@@ -48,8 +67,9 @@ export async function listFollowupsFromDb(): Promise<FollowupRecord[]> {
     FROM customer_followups f
     JOIN customers c ON c.id = f.customer_id
     LEFT JOIN quotes q ON q.id = f.quote_id
+    ${dateFilter.where}
     ORDER BY f.created_at DESC
-  `);
+  `, dateFilter.values);
   const rows = result.rows.map(mapFollowupRow);
   const timelineByCustomer = new Map<string, FollowupRecord["timeline"]>();
   rows.forEach((row) => {
@@ -88,6 +108,42 @@ export async function createFollowup(input: FollowupInput): Promise<FollowupReco
   const followup = (await listFollowupsFromDb()).find((entry) => entry.id === id);
   if (!followup) throw new Error("Followup creation failed");
   return followup;
+}
+
+export async function createSystemFollowup(input: {
+  customerId?: string | null;
+  quoteId?: string | null;
+  type?: FollowupType;
+  status?: FollowupStatus;
+  content: string;
+  owner?: string;
+  nextFollowUpAt?: string | null;
+  client?: DbExecutor;
+}): Promise<string | null> {
+  if (!input.customerId) return null;
+  if (!input.client) await initDb();
+  const client = input.client ?? getPool();
+  const id = `fu-${randomUUID()}`;
+  const status = input.status ?? "跟进中";
+  await client.query(
+    `INSERT INTO customer_followups (id, customer_id, quote_id, followup_type, followup_status, content, owner, next_follow_up_at, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())`,
+    [
+      id,
+      input.customerId,
+      input.quoteId ?? null,
+      input.type ?? "客户跟进",
+      status,
+      input.content,
+      input.owner ?? "系统",
+      normalizeDbTimestamp(input.nextFollowUpAt ?? undefined)
+    ]
+  );
+  await client.query("UPDATE customers SET last_follow_up_at = now(), status = $2 WHERE id = $1", [
+    input.customerId,
+    status === "已成交" ? "活跃" : status === "暂缓跟进" ? "潜在" : "跟进中"
+  ]);
+  return id;
 }
 
 export async function updateFollowup(id: string, input: Partial<FollowupInput>): Promise<FollowupRecord | null> {

@@ -11,10 +11,18 @@ export async function listAdminNotifications(): Promise<{ unreadCount: number; i
     LIMIT 20
   `);
   const messageRows = await getPool().query(`
-    SELECT cm.id, cm.source_text AS "body", cm.created_at AS "createdAt", c.company, c.contact_name AS "customerName", c.whatsapp, q.id AS "quoteId", q.quote_no AS "quoteNo"
+    SELECT
+      cm.id,
+      cm.source_text AS "body",
+      cm.created_at AS "createdAt",
+      COALESCE(c.company, cv.contact_company, '') AS company,
+      COALESCE(c.contact_name, cv.contact_name, cv.contact_company, '') AS "customerName",
+      COALESCE(c.whatsapp, cv.contact_whatsapp, '') AS whatsapp,
+      q.id AS "quoteId",
+      q.quote_no AS "quoteNo"
     FROM conversation_messages cm
     JOIN conversations cv ON cv.id = cm.conversation_id
-    JOIN customers c ON c.id = cv.customer_id
+    LEFT JOIN customers c ON c.id = cv.customer_id
     LEFT JOIN quotes q ON q.id = cv.quote_id
     WHERE cm.direction = 'inbound'
     ORDER BY cm.created_at DESC

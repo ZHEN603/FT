@@ -18,8 +18,8 @@ import {
 import { FormEvent, useMemo, useState } from "react";
 
 export default function AdminLoginPage() {
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin123");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [captcha, setCaptcha] = useState("");
   const [captchaSrc, setCaptchaSrc] = useState(() => `/api/auth/captcha?t=${Date.now()}`);
   const [remember, setRemember] = useState(false);
