@@ -47,7 +47,7 @@ export async function GET() {
   response.cookies.set(CAPTCHA_COOKIE, encodeCaptcha(code), {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: process.env.COOKIE_SECURE === "true",
     path: "/",
     maxAge: 5 * 60
   });
