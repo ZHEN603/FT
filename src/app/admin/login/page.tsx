@@ -15,13 +15,14 @@ import {
   UserRound,
   Users
 } from "lucide-react";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 export default function AdminLoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [captcha, setCaptcha] = useState("");
-  const [captchaSrc, setCaptchaSrc] = useState(() => `/api/auth/captcha?t=${Date.now()}`);
+  const [captchaSrc, setCaptchaSrc] = useState("");
+  useEffect(() => { setCaptchaSrc(`/api/auth/captcha?t=${Date.now()}`); }, []);
   const [remember, setRemember] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
