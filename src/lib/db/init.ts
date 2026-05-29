@@ -577,24 +577,19 @@ async function ensureBootstrapAdminUser() {
   if (Number(userCount.rows[0]?.count ?? 0) > 0) return;
 
   const id = process.env.ADMIN_BOOTSTRAP_ID || "admin-001";
-  const username = process.env.ADMIN_BOOTSTRAP_USERNAME || "";
-  const password = process.env.ADMIN_BOOTSTRAP_PASSWORD || "";
-  const name = process.env.ADMIN_BOOTSTRAP_NAME || "";
-  const email = process.env.ADMIN_BOOTSTRAP_EMAIL || "";
+  const username = process.env.ADMIN_BOOTSTRAP_USERNAME || "admin";
+  const password = process.env.ADMIN_BOOTSTRAP_PASSWORD || "admin123";
+  const name = process.env.ADMIN_BOOTSTRAP_NAME || "管理员";
+  const email = process.env.ADMIN_BOOTSTRAP_EMAIL || "admin@example.com";
   const displayName = process.env.ADMIN_BOOTSTRAP_DISPLAY_NAME || name;
   const whatsapp = process.env.ADMIN_BOOTSTRAP_WHATSAPP || "";
-
-  if (!username || !password || !name || !email) {
-    throw new Error(
-      "No admin users exist. Set ADMIN_BOOTSTRAP_USERNAME, ADMIN_BOOTSTRAP_PASSWORD, ADMIN_BOOTSTRAP_NAME, and ADMIN_BOOTSTRAP_EMAIL before first startup."
-    );
-  }
 
   await getPool().query(
     `INSERT INTO users (id, username, password, name, email, role, display_name, personal_whatsapp, whatsapp_owner_enabled)
      VALUES ($1, $2, $3, $4, $5, 'super_admin', $6, $7, true)`,
     [id, username, password, name, email, displayName, whatsapp]
   );
+  console.log(`[bootstrap] Admin user created: ${username} (change password after first login)`);
 }
 
 // ─── Shared utilities referenced within init.ts ───────────────────────────────
